@@ -1,0 +1,57 @@
+nombre: AINEs — Selección farmacológica
+tipo: clinical
+descripcion: Flujo para elegir el AINE adecuado según contexto clínico
+
+pasos:
+  - orden: 1
+    nodo: dolor agudo
+    tipo_nodo: sintoma
+    descripcion: "Evaluar intensidad (EVA), localización, duración, causa"
+
+  - orden: 2
+    nodo: ibuprofeno
+    tipo_nodo: farmaco
+    condicion: "Dolor leve-moderado, sin riesgo GI ni CV"
+    descripcion: "400-600 mg c/6-8h. Máx 2400 mg/día. Primera elección por perfil riesgo/beneficio"
+
+  - orden: 3
+    nodo: paracetamol
+    tipo_nodo: farmaco
+    condicion: "Dolor leve, fiebre, riesgo GI alto, embarazo"
+    descripcion: "500-1000 mg c/6-8h. Máx 3g/día. No antiinflamatorio. Hepatotóxico >4g/día. Antídoto: N-acetilcisteína"
+
+  - orden: 4
+    nodo: diclofenac
+    tipo_nodo: farmaco
+    condicion: "Dolor moderado-severo, componente inflamatorio importante"
+    descripcion: "50 mg c/8h o 75 mg c/12h. Máx 150 mg/día. Mayor riesgo CV que ibuprofeno"
+
+  - orden: 5
+    nodo: ketorolac
+    tipo_nodo: farmaco
+    condicion: "Dolor agudo severo, postoperatorio, cólico renal"
+    descripcion: "10 mg VO c/6h o 30 mg IM/IV. Máximo 5 días. Alto riesgo GI"
+
+  - orden: 6
+    nodo: naproxeno
+    tipo_nodo: farmaco
+    condicion: "Dolor crónico, inflamación sostenida, paciente con riesgo CV"
+    descripcion: "250-500 mg c/12h. Menor riesgo CV entre los AINEs. Buena opción crónica"
+
+  - orden: 7
+    nodo: celecoxib
+    tipo_nodo: farmaco
+    condicion: "Riesgo GI alto, necesita antiinflamatorio"
+    descripcion: "200 mg/día. COX-2 selectivo. Menor gastropatía. Contraindicado en riesgo CV alto"
+
+  - orden: 8
+    nodo: aspirina
+    tipo_nodo: farmaco
+    condicion: "Cardioprotección, fiebre reumática"
+    descripcion: "100 mg/día cardioprotección. 500-1000 mg analgésico. Contraindicado <16 años (Reye). Inhibe COX irreversiblemente"
+
+  - orden: 9
+    nodo: corticosteroides
+    tipo_nodo: grupo_farmacologico
+    condicion: "Inflamación severa, autoinmune, obstrucción de vía aérea, no responde a AINEs"
+    descripcion: "Prednisona 0.5-1 mg/kg/día. Dexametasona en crup/edema. Siempre curso corto si es posible. Efectos adversos: Cushing, osteoporosis, supresión HPA"

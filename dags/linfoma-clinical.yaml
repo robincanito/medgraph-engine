@@ -1,0 +1,39 @@
+nombre: Linfoma — Manejo clínico
+tipo: clinical
+descripcion: Tratamiento según tipo de linfoma
+
+pasos:
+  - orden: 1
+    nodo: linfoma de hodgkin
+    tipo_nodo: patologia
+    descripcion: "Esclerosis nodular (70%), celularidad mixta (20-25%), rico en linfocitos, depleción linfocitaria"
+
+  - orden: 2
+    nodo: ABVD
+    tipo_nodo: farmaco
+    descripcion: "Adriamicina + Bleomicina + Vinblastina + Dacarbazina. Estadios I-II: 2-4 ciclos + RT. Estadios III-IV: 6-8 ciclos"
+
+  - orden: 3
+    nodo: linfoma difuso de células grandes B
+    tipo_nodo: patologia
+    descripcion: "Linfoma más frecuente (35%). Agresivo. Subtipos: GCB vs ABC"
+
+  - orden: 4
+    nodo: R-CHOP
+    tipo_nodo: farmaco
+    descripcion: "Rituximab + Ciclofosfamida + Doxorrubicina + Vincristina + Prednisona. 6-8 ciclos c/21 días"
+
+  - orden: 5
+    nodo: linfoma folicular
+    tipo_nodo: patologia
+    descripcion: "Indolente. t(14;18)/BCL2. Curso crónico con recaídas"
+
+  - orden: 6
+    nodo: rituximab
+    tipo_nodo: farmaco
+    descripcion: "Anti-CD20. Mantenimiento cada 2 meses x 2 años post-inducción"
+
+  - orden: 7
+    nodo: linfoma de burkitt
+    tipo_nodo: patologia
+    descripcion: "Muy agresivo. t(8;14)/MYC. Patrón cielo estrellado. Quimio intensiva urgente"

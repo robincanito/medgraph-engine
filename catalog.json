@@ -1,0 +1,82 @@
+{
+  "libros": [
+    {
+      "id": "farreras-2020",
+      "archivo": "Farreras Rozman Medicina Interna 20a Edicion.pdf",
+      "titulo": "Medicina Interna",
+      "autor": "Farreras Valentí, P.; Rozman, C.",
+      "edicion": "20°",
+      "paginas": 2953,
+      "tipo_pdf": "digital",
+      "estado": "parseado",
+      "fecha_parseo": "2026-03-16T11:19:07.777125",
+      "chunks_generados": 3008
+    },
+    {
+      "id": "garcia-feijoo-2012",
+      "archivo": "Manual de Oftalmologia Garcia Feijoo (2012).pdf",
+      "titulo": "Manual de Oftalmología",
+      "autor": "García-Feijóo, J. y Pablo-Júlvez, L.E.",
+      "edicion": "1°",
+      "paginas": 377,
+      "tipo_pdf": "digital",
+      "estado": "parseado",
+      "fecha_parseo": "2026-03-16T11:19:10.353875",
+      "chunks_generados": 307,
+      "chunks_v2": 887,
+      "parents_v2": 296,
+      "fecha_parseo_v2": "2026-03-17T19:17:21.710814"
+    },
+    {
+      "id": "cie10",
+      "archivo": "CIE 10.pdf",
+      "titulo": "Clasificación Internacional de Enfermedades (CIE-10)",
+      "autor": "OMS",
+      "paginas": 303,
+      "tipo_pdf": "digital",
+      "estado": "parseado",
+      "fecha_parseo": "2026-03-16T11:19:11.552750",
+      "chunks_generados": 131,
+      "chunks_v2": 448,
+      "parents_v2": 150,
+      "fecha_parseo_v2": "2026-03-17T19:17:22.836141"
+    },
+    {
+      "id": "diamante-orl",
+      "archivo": "Diamante.pdf",
+      "titulo": "Otorrinolaringología y afecciones conexas",
+      "autor": "Diamante, Vicente",
+      "paginas": 323,
+      "tipo_pdf": "digital",
+      "estado": "parseado",
+      "fecha_parseo": "2026-03-16T12:00:22.405044",
+      "chunks_generados": 187,
+      "chunks_v2": 500,
+      "parents_v2": 167,
+      "fecha_parseo_v2": "2026-03-17T19:17:23.482406"
+    },
+    {
+      "id": "derma-clinica",
+      "archivo": "Fundamentos en dermatologia clinica.pdf",
+      "titulo": "Fundamentos en dermatología clínica",
+      "autor": "Varios",
+      "paginas": 157,
+      "tipo_pdf": "escaneado",
+      "estado": "parseado",
+      "fecha_parseo": "2026-03-17T17:54:08.911377",
+      "chunks_generados": 0,
+      "nota": "Parseado con OCR (Google Cloud Vision). PDF escaneado, no tiene texto extraíble. Requiere OCR (Tesseract o similar)"
+    }
+  ],
+  "course_materials": {
+    "estado": "parseadas_parcialmente",
+    "nota": "Example catalog entry. Configure your own books."
+  },
+  "libros_faltantes": [
+    "Dubín - Electrocardiografía práctica",
+    "Harrison - Principios de Medicina Interna",
+    "Fernández Bussy - Enfermedades de la piel (UNR Editora)",
+    "San Román - Manual de diagnóstico por imágenes",
+    "Sanguinetti - Semiología, Semiotecnia y Medicina Interna"
+  ]
+}

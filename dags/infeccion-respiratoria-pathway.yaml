@@ -1,0 +1,59 @@
+nombre: Infección respiratoria alta — Diagnóstico diferencial
+tipo: pathway
+descripcion: Flujo clínico para orientar diagnóstico ante síntomas respiratorios altos
+
+pasos:
+  - orden: 1
+    nodo: odinofagia
+    tipo_nodo: sintoma
+    descripcion: "Dolor de garganta. Evaluar duración, intensidad, disfagia"
+
+  - orden: 2
+    nodo: fiebre
+    tipo_nodo: signo
+    descripcion: "Medir temperatura. <38°C orienta viral, >38.5°C considerar bacteriana"
+
+  - orden: 3
+    nodo: rinorrea
+    tipo_nodo: signo
+    descripcion: "Serosa = viral. Purulenta >10 días = sinusitis bacteriana"
+
+  - orden: 4
+    nodo: examen faríngeo
+    tipo_nodo: procedimiento
+    descripcion: "Evaluar: eritema, exudado, petequias palatinas, hipertrofia amigdalina"
+
+  - orden: 5
+    nodo: adenopatías cervicales
+    tipo_nodo: signo
+    descripcion: "Submaxilares dolorosas = faringitis EBHGA. Cervicales posteriores + esplenomegalia = mononucleosis"
+
+  - orden: 6
+    nodo: faringitis estreptocócica
+    tipo_nodo: patologia
+    condicion: "Exudado amigdalino + fiebre alta + adenopatía submaxilar + ausencia de tos"
+    descripcion: "Score de Centor ≥3. Test rápido o cultivo. Tratamiento: amoxicilina 50 mg/kg/día x 10 días"
+
+  - orden: 7
+    nodo: resfrío común
+    tipo_nodo: patologia
+    condicion: "Rinorrea + congestión + tos + febrícula. Sin exudado"
+    descripcion: "Autolimitado 5-7 días. Tratamiento sintomático. NO antibióticos"
+
+  - orden: 8
+    nodo: mononucleosis infecciosa
+    tipo_nodo: patologia
+    condicion: "Adolescente/adulto joven + faringitis + adenopatías generalizadas + esplenomegalia"
+    descripcion: "Solicitar hemograma (linfocitos atípicos), monotest, IgM anti-VCA. Reposo. NO amoxicilina (exantema)"
+
+  - orden: 9
+    nodo: sinusitis aguda
+    tipo_nodo: patologia
+    condicion: "Rinorrea purulenta >10 días O empeoramiento tras mejoría inicial"
+    descripcion: "Amoxicilina-clavulánico. Si alergia: moxifloxacino"
+
+  - orden: 10
+    nodo: laringitis
+    tipo_nodo: patologia
+    condicion: "Disfonía + tos perruna + estridor. Predomina en niños (crup)"
+    descripcion: "Viral. Dexametasona VO dosis única. Adrenalina nebulizada si estridor en reposo"

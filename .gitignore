@@ -1,0 +1,28 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Data (copyrighted book content — not open source)
+parsed/
+extracted/
+data/processed/
+data/enriched/
+
+# Runtime
+dedup_checkpoint.json
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TP Informatica (not part of MedGraph)
+TP INFORMATICA/

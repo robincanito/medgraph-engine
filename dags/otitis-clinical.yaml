@@ -1,0 +1,94 @@
+nombre: manejo-otalgia
+tipo: clinical
+descripcion: "Razonamiento clinico ante un paciente con otalgia"
+
+pasos:
+  # Evaluacion inicial
+  - nodo: "otalgia"
+    tipo_nodo: sintoma
+    tipo_paso: inicio
+    orden: 1
+
+  - nodo: "anamnesis"
+    tipo_nodo: procedimiento
+    tipo_paso: evaluacion
+    orden: 2
+    nota: "edad, duracion, fiebre, antecedentes ORL, trauma"
+
+  - nodo: "otoscopia"
+    tipo_nodo: procedimiento
+    tipo_paso: evaluacion
+    orden: 3
+
+  # Bifurcacion segun hallazgo
+  - nodo: "otitis media aguda"
+    tipo_nodo: patologia
+    tipo_paso: decision
+    orden: 4
+    condicion: "MT abombada, eritematosa, opaca"
+
+  - nodo: "otitis externa"
+    tipo_nodo: patologia
+    tipo_paso: decision
+    orden: 4
+    condicion: "CAE edematoso, signo del trago positivo, MT normal"
+
+  - nodo: "otitis media efusiva"
+    tipo_nodo: patologia
+    tipo_paso: decision
+    orden: 4
+    condicion: "MT retraida, nivel hidroaereo, sin signos inflamatorios"
+
+  - nodo: "otalgia referida"
+    tipo_nodo: patologia
+    tipo_paso: decision
+    orden: 4
+    condicion: "MT normal, CAE normal, otoscopia sin hallazgos"
+
+  # Acciones segun diagnostico
+  - nodo: "amoxicilina"
+    tipo_nodo: farmaco
+    tipo_paso: accion
+    orden: 5
+    condicion: "si OMA confirmada"
+    nota: "80-90 mg/kg/dia, 10 dias"
+
+  - nodo: "gotas oticas con antibiotico"
+    tipo_nodo: farmaco
+    tipo_paso: accion
+    orden: 5
+    condicion: "si otitis externa"
+    nota: "ciprofloxacina otica"
+
+  - nodo: "conducta expectante"
+    tipo_nodo: procedimiento
+    tipo_paso: accion
+    orden: 5
+    condicion: "si otitis media efusiva"
+    nota: "control en 3 meses"
+
+  - nodo: "evaluar ATM y faringe"
+    tipo_nodo: procedimiento
+    tipo_paso: accion
+    orden: 5
+    condicion: "si otalgia referida"
+
+  # Seguimiento
+  - nodo: "control 48-72hs"
+    tipo_nodo: procedimiento
+    tipo_paso: seguimiento
+    orden: 6
+    condicion: "si OMA con amoxicilina"
+
+  - nodo: "amoxicilina-clavulanico"
+    tipo_nodo: farmaco
+    tipo_paso: accion
+    orden: 7
+    condicion: "si no mejora en 48-72hs"
+    nota: "sospecha de resistencia"
+
+  - nodo: "derivacion ORL"
+    tipo_nodo: procedimiento
+    tipo_paso: accion
+    orden: 7
+    condicion: "si sospecha de mastoiditis o complicacion"

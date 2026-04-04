@@ -1,0 +1,50 @@
+nombre: fisiopatologia-oma
+tipo: pathway
+descripcion: "Cadena causal de la otitis media aguda: desde el agente hasta las complicaciones"
+
+pasos:
+  - nodo: "streptococcus pneumoniae"
+    tipo_nodo: agente
+    orden: 1
+
+  - nodo: "colonizacion nasofaringea"
+    tipo_nodo: hallazgo
+    orden: 2
+
+  - nodo: "disfuncion tubaria"
+    tipo_nodo: hallazgo
+    orden: 3
+
+  - nodo: "infeccion oido medio"
+    tipo_nodo: patologia
+    orden: 4
+
+  - nodo: "inflamacion mucosa del oido medio"
+    tipo_nodo: hallazgo
+    orden: 5
+
+  - nodo: "acumulacion de exudado"
+    tipo_nodo: hallazgo
+    orden: 6
+
+  - nodo: "abombamiento de membrana timpanica"
+    tipo_nodo: signo
+    orden: 7
+
+  - nodo: "otalgia"
+    tipo_nodo: sintoma
+    orden: 8
+
+  - nodo: "hipoacusia conductiva"
+    tipo_nodo: hallazgo
+    orden: 9
+
+  - nodo: "perforacion timpanica"
+    tipo_nodo: signo
+    orden: 10
+    nota: "complicacion si no se trata"
+
+  - nodo: "mastoiditis"
+    tipo_nodo: patologia
+    orden: 11
+    nota: "complicacion grave"

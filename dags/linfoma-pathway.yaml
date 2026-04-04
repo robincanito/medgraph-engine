@@ -1,0 +1,44 @@
+nombre: Linfoma — Razonamiento diagnóstico
+tipo: pathway
+descripcion: Flujo clínico desde adenopatía hasta diagnóstico y estadificación de linfoma
+
+pasos:
+  - orden: 1
+    nodo: adenopatía persistente
+    tipo_nodo: signo
+    descripcion: "Adenopatía >2 semanas, indolora, firme, no adherida"
+
+  - orden: 2
+    nodo: síntomas B
+    tipo_nodo: signo
+    descripcion: "Evaluar: fiebre >38°C, sudoración nocturna, pérdida de peso >10% en 6 meses"
+
+  - orden: 3
+    nodo: hemograma completo
+    tipo_nodo: metodo_dx
+    descripcion: "Leucocitosis con linfocitos atípicos, anemia, VSG elevada"
+
+  - orden: 4
+    nodo: biopsia ganglionar
+    tipo_nodo: procedimiento
+    descripcion: "Biopsia excisional de ganglio. NUNCA punción aspirativa. Preferir supraclavicular/laterocervical"
+
+  - orden: 5
+    nodo: inmunofenotipo
+    tipo_nodo: metodo_dx
+    descripcion: "CD20, CD3, CD5, CD10, CD23, ciclina D1, BCL2, BCL6, Ki-67"
+
+  - orden: 6
+    nodo: linfoma
+    tipo_nodo: patologia
+    descripcion: "Clasificar: Hodgkin vs No Hodgkin. Subtipo histológico según OMS"
+
+  - orden: 7
+    nodo: tomografía PET-TC
+    tipo_nodo: metodo_dx
+    descripcion: "Estadificación Ann Arbor (I-IV). Evaluar masa bulky (>10 cm)"
+
+  - orden: 8
+    nodo: biopsia de médula ósea
+    tipo_nodo: procedimiento
+    descripcion: "Completar estadificación. Infiltración medular = estadio IV"
