@@ -12,42 +12,17 @@ CLI: python migrate_chunks.py [upload|swap|verify|clean|full]
 
 import json
 import os
-import unicodedata
 import time
-from db import run_write, run_query
+
+from db import run_query, run_write
+
+# normalize_for_search / normalize_chunks viven en pipeline/parseo.py desde el 6-sep-2026
+# (una sola fuente de verdad); se re-exportan para los scripts que las importan de aca.
+from pipeline.parseo import normalize_chunks, normalize_for_search  # noqa: F401
 
 PARSED_DIR = os.path.join(os.path.dirname(__file__), "parsed")
 CATALOG_PATH = os.path.join(os.path.dirname(__file__), "catalog.json")
 BATCH_SIZE = 100
-
-
-def normalize_for_search(text: str) -> str:
-    """Quita acentos y pasa a minúsculas para full-text search."""
-    if not text:
-        return ""
-    nfkd = unicodedata.normalize('NFKD', text)
-    return ''.join(c for c in nfkd if not unicodedata.combining(c)).lower()
-
-
-def normalize_chunks(children: list) -> None:
-    """Agrega propiedades normalizadas a los chunks (in-place).
-
-    Agrega: text_busqueda, titulo_seccion_busqueda, titulo_capitulo_busqueda, keywords
-    """
-    for chunk in children:
-        chunk["text_busqueda"] = normalize_for_search(chunk["text"])
-        chunk["titulo_seccion_busqueda"] = normalize_for_search(chunk.get("titulo_seccion", ""))
-        chunk["titulo_capitulo_busqueda"] = normalize_for_search(chunk.get("titulo_capitulo", ""))
-
-        # Keywords: combinar título + primeras 50 palabras
-        kw_parts = []
-        if chunk.get("titulo_capitulo"):
-            kw_parts.append(chunk["titulo_capitulo"])
-        if chunk.get("titulo_seccion"):
-            kw_parts.append(chunk["titulo_seccion"])
-        first_words = " ".join(chunk["text"].split()[:50])
-        kw_parts.append(first_words)
-        chunk["keywords"] = normalize_for_search(" ".join(kw_parts))
 
 
 def upload_chunks_for_libro(libro_id: str, children: list, parents: list,
@@ -284,7 +259,7 @@ def full_migration():
     print("  MIGRACIÓN COMPLETA v1 -> v2")
     print("=" * 60)
 
-    catalog = json.load(open(CATALOG_PATH, "r", encoding="utf-8"))
+    catalog = json.load(open(CATALOG_PATH, encoding="utf-8"))
 
     # Paso 1: Cargar todos los chunks v2
     all_children = []
@@ -298,9 +273,9 @@ def full_migration():
             print(f"  SKIP: {libro['titulo']} (no tiene v2 chunks)")
             continue
 
-        with open(children_path, "r", encoding="utf-8") as f:
+        with open(children_path, encoding="utf-8") as f:
             children = json.load(f)
-        with open(parents_path, "r", encoding="utf-8") as f:
+        with open(parents_path, encoding="utf-8") as f:
             parents = json.load(f)
 
         # Normalizar para full-text
@@ -388,13 +363,13 @@ if __name__ == "__main__":
     if cmd == "verify":
         counts = verify_counts()
         print(f"\n{'='*60}")
-        print(f"  ESTADO DE NEO4J")
+        print("  ESTADO DE NEO4J")
         print(f"{'='*60}")
         for k, v in counts.items():
             if k != "by_libro":
                 print(f"  {k}: {v}")
         if counts.get("by_libro"):
-            print(f"\n  Por libro:")
+            print("\n  Por libro:")
             for libro, n in counts["by_libro"].items():
                 print(f"    {libro}: {n}")
 
@@ -414,9 +389,9 @@ if __name__ == "__main__":
             print(f"Primero correr: python parser_v2.py {libro_id}")
             sys.exit(1)
 
-        with open(children_path, "r", encoding="utf-8") as f:
+        with open(children_path, encoding="utf-8") as f:
             children = json.load(f)
-        with open(parents_path, "r", encoding="utf-8") as f:
+        with open(parents_path, encoding="utf-8") as f:
             parents = json.load(f)
 
         normalize_chunks(children)
