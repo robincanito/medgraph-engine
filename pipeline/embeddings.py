@@ -23,6 +23,19 @@ EMBEDDING_MODEL = "gemini-embedding-2"
 
 
 EMBEDDING_DIMS = 3072
+# Tanda 2b/3 (6 y 7-sep-2026): todo vector que se guarda lleva Chunk.embedding_forma con el
+# nombre de la forma de texto con que se embebio. "canonico" = build_embedding_text. La
+# auditoria (audit_embedding_prefix.py) lee esa marca en vez de re-embeber muestras, y el
+# 40% del corpus que estuvo mezclado durante semanas se hubiera detectado en el primer run.
+EMBEDDING_FORMA = "canonico"
+# La UNICA sentencia que guarda embeddings. Los cuatro writers (CLI vectorize/ingest, API
+# ingest, reembed) la importan: si alguien vuelve a escribir "SET c.embedding" a mano sin
+# la forma, tests/test_pipeline_embeddings.py lo frena.
+CYPHER_GUARDAR_EMBEDDINGS = f"""
+UNWIND $updates AS u
+MATCH (c:Chunk {{id: u.id}})
+SET c.embedding = u.embedding, c.embedding_forma = '{EMBEDDING_FORMA}'
+"""
 
 
 def crear_cliente(project: str, location: str):

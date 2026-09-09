@@ -299,7 +299,7 @@ def vectorize_chunks(libro_id: str):
 
         try:
             result = client.models.embed_content(
-                model="gemini-embedding-2-preview",
+                model="gemini-embedding-2",
                 contents=texts,
             )
             updates = [{"id": c["id"], "embedding": e.values}

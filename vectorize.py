@@ -13,7 +13,7 @@ PARSED_DIR = os.path.join(os.path.dirname(__file__), "parsed")
 CATALOG_PATH = os.path.join(os.path.dirname(__file__), "catalog.json")
 
 # Embedding config
-EMBEDDING_MODEL = "gemini-embedding-2-preview"
+EMBEDDING_MODEL = "gemini-embedding-2"
 EMBEDDING_DIMS = 3072
 GCP_API_KEY = os.getenv("GCP_API_KEY", "")
 BATCH_SIZE = 10  # Smaller batches for gemini-embedding-2 (token limits)
@@ -77,7 +77,7 @@ def build_embedding_text(chunk: dict) -> str:
 
 
 def generate_embeddings(client, texts: list) -> list:
-    """Genera embeddings con gemini-embedding-2-preview via google-genai."""
+    """Genera embeddings con gemini-embedding-2 via google-genai."""
     truncated = [t[:2000] if len(t) > 2000 else t for t in texts]
     result = client.models.embed_content(
         model=EMBEDDING_MODEL,

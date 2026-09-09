@@ -1,0 +1,169 @@
+# Perfil de dominio: bibliografía médica (MedGraph)
+# Fuente: taxonomía en producción de extract_entities.py (2026-07, 159K+ entidades)
+profile: medicina
+version: 1
+language: es
+
+graph:
+  target: medgraph            # resuelve a secret neo4j-uri
+  name_property: nombre       # legado — dominios nuevos usan `name`
+
+entities:
+  - id: patologia
+    label: Patologia
+    desc: "enfermedades y condiciones: otitis media, neumonía, diabetes, HTA, psoriasis"
+  - id: estructura_anatomica
+    label: EstructuraAnatomica
+    desc: "estructuras: oído medio, membrana timpánica, retina, riñón, hígado"
+  - id: procedimiento
+    label: Procedimiento
+    desc: "técnicas y procedimientos: otoscopía, ECG, intubación, toma de TA"
+  - id: farmaco
+    label: Farmaco
+    desc: "fármacos específicos: furosemida, amoxicilina, ibuprofeno, metformina"
+  - id: grupo_farmacologico
+    label: GrupoFarmacologico
+    desc: "clases de fármacos: diuréticos, betalactámicos, AINEs, corticoides"
+  - id: agente
+    label: Agente
+    desc: "agentes infecciosos: S. pneumoniae, virus sincicial respiratorio, E. coli"
+  - id: signo
+    label: Signo
+    desc: "signos clínicos objetivos: fiebre, edema, soplo, cianosis, abombamiento timpánico"
+  - id: sintoma
+    label: Sintoma
+    desc: "síntomas subjetivos: otalgia, cefalea, disnea, dolor torácico"
+  - id: metodo_dx
+    label: MetodoDx
+    desc: "métodos diagnósticos: hemograma, ecografía, audiometría, PCR"
+  - id: hallazgo
+    label: Hallazgo
+    desc: "hallazgos en estudios o examen: derrame, consolidación, hipertrofia"
+  - id: parametro
+    label: Parametro
+    desc: "parámetros medibles: kalemia, TA sistólica, FC, saturación de O2"
+
+# Reglas VALIDADAS empiricamente contra el grafo real (2026-07-30, 138 libros).
+# La primera version era demasiado estrecha: marcaba 71.569 relaciones como invalidas,
+# de las cuales la mayoria eran reglas mal escritas, no datos malos. Los `to` que se
+# agregaron abajo con nota "validado" salieron de mirar que produce el extractor.
+relations:
+  - id: CAUSADA_POR
+    from: [patologia, signo, sintoma, hallazgo]
+    # parametro validado: "trastornos tromboticos CAUSADA_POR factor v de leiden" (567 casos)
+    # hallazgo validado: "paro cardiaco CAUSADA_POR muerte encefalica" (540)
+    to: [agente, patologia, farmaco, parametro, hallazgo, estructura_anatomica]
+  - id: SE_MANIFIESTA_CON
+    from: [patologia, signo, hallazgo]
+    # parametro validado: "disfuncion primaria SE_MANIFIESTA_CON enzimas hepaticas" (2212)
+    # patologia validado: "lesion neurologica SE_MANIFIESTA_CON coma irreversible" (11399)
+    to: [signo, sintoma, hallazgo, parametro, patologia, estructura_anatomica]
+  - id: SE_DIAGNOSTICA_CON
+    # hallazgo validado como origen: "muerte encefalica SE_DIAGNOSTICA_CON protocolo" (383)
+    from: [patologia, hallazgo]
+    # parametro validado: "daño miocardico SE_DIAGNOSTICA_CON troponina" (1406)
+    to: [metodo_dx, procedimiento, parametro, hallazgo]
+  - id: SE_TRATA_CON
+    from: [patologia]
+    to: [farmaco, grupo_farmacologico, procedimiento]
+  - id: PARTE_DE
+    from: [estructura_anatomica]
+    to: [estructura_anatomica]
+  - id: EVALUA
+    from: [metodo_dx, procedimiento]
+    to: [estructura_anatomica, patologia, parametro]
+  - id: PERTENECE_A
+    # Admite jerarquias DENTRO del mismo label — no solo farmaco->grupo.
+    # Validado: grupo->grupo (598, "catecolaminas PERTENECE_A farmacos vasopresores"),
+    # patologia->patologia (621, "fractura de craneo PERTENECE_A traumatismo encefalico").
+    # OJO: farmaco->farmaco (1749) NO es jerarquia, son SINONIMOS sin deduplicar
+    # (ej "99mtchmpao / hexametilpropilenaminoxima") -> arreglar en dedup, no aca.
+    from: [farmaco, grupo_farmacologico, patologia, estructura_anatomica, agente]
+    to: [grupo_farmacologico, patologia, estructura_anatomica, agente, procedimiento]
+  - id: PUEDE_PRODUCIR
+    from: [farmaco, grupo_farmacologico, procedimiento, agente]
+    to: [patologia, signo, sintoma, hallazgo]
+  - id: DIFERENCIAL_DE
+    from: [patologia]
+    to: [patologia]
+  - id: ASOCIADA_A            # laxa a propósito: asociación inespecífica
+    from: [patologia, signo, sintoma, hallazgo, parametro, farmaco, procedimiento]
+    to: [patologia, signo, sintoma, hallazgo, parametro, farmaco, procedimiento]
+  - id: FACTOR_DE_RIESGO
+    from: [patologia, hallazgo, parametro, farmaco, agente]
+    to: [patologia]
+  - id: COMPLICACION_DE
+    # signo validado como origen: "palidez COMPLICACION_DE menometrorragia" (259)
+    from: [patologia, hallazgo, signo]
+    # farmaco validado: "hemorragia gastrointestinal COMPLICACION_DE salicilatos" (253)
+    to: [patologia, procedimiento, farmaco, hallazgo, signo]
+  - id: VARIANTE_DE
+    from: [patologia]
+    to: [patologia]
+
+# Como se PARSEA y se CHUNKEA este material (9-sep-2026, ver pipeline/estrategia.py). Vivia en
+# el codigo del parser, o sea que "Farreras numera sus capitulos asi" era un commit y no un dato
+# del dominio. Todo lo de aca abajo es opcional: sin estas secciones rige el default historico.
+parse:
+  # Patrones genericos de estructura para bibliografia medica.
+  structure_patterns:
+    capitulo:
+    - ^SECCIÓN\s+[IVXLCDM]+
+    - ^CAPÍTULO\s+\d+
+    - ^Capítulo\s+\d+
+    - ^PARTE\s+\d+
+    seccion:
+    - ^\d+\.\d+[\s\.]+[A-ZÁÉÍÓÚÑ]
+    - ^[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{5,60}$
+  # Excepciones: fuentes cuya numeracion no matchea el generico (se descubrieron parseando).
+  por_fuente:
+    farreras-2020:
+      capitulo:
+      - ^SECCIÓN\s+[IVXLCDM]+\b
+      - ^Capítulo\s+\d+
+      - ^CAPÍTULO\s+\d+
+      seccion:
+      - ^\d+\.\d+[\s\.]+[A-ZÁÉÍÓÚÑ]
+      - ^[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{5,60}$
+    garcia-feijoo-2012:
+      capitulo:
+      - PA\s*R\s*T\s*E\s+\d+
+      - ^PARTE\s+\d+
+      seccion:
+      - ^\d+\s*\|\s*.+
+      - ^\d+\.\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{3,}
+    diamante-orl:
+      capitulo:
+      - ^SECCIÓN\s+[IVXLCDM]+
+      - ^Sección\s+[IVXLCDM]+
+      - ^CAPÍTULO\s+\d+
+      seccion:
+      - ^\d+\.\s+[A-ZÁÉÍÓÚÑ]
+      - ^[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{5,50}$
+
+# Prosa medica: el parrafo es la unidad de sentido, chunks chicos con solape generoso. Estos son
+# los numeros con que se ingirio TODO el corpus actual (90.806 chunks, 163 libros): cambiarlos
+# obliga a re-chunkear el corpus y a bumpear `version`.
+chunk:
+  target_size: 280
+  min_size: 150
+  max_size: 380
+  overlap: 60
+  parent_window: 3
+  max_parent_words: 1200
+
+extraction:
+  model: gemini-3.1-flash-lite
+  batch_size: 3
+  min_words: 100
+  prompt_template: prompts/medicina.md
+  rules: |
+    - Nombres canónicos SIEMPRE en español, sin importar el idioma del texto:
+      "heart failure" → "insuficiencia cardíaca", "furosemide" → "furosemida".
+    - Incluir sinónimos y abreviaturas comunes (español e inglés): "OMA", "IC", "EPOC".
+    - Solo entidades médicas concretas — no conceptos vagos ("el paciente", "la enfermedad").
+    - Las relaciones deben conectar entidades presentes en el texto; NO inventar.
+
+canonicalization:
+  merge_synonyms: true
+  min_name_length: 2

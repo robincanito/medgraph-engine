@@ -22,58 +22,21 @@ import re
 import unicodedata
 from collections import Counter
 
-TARGET_SIZE = 280       # palabras objetivo por child chunk
-MIN_SIZE = 150          # mínimo aceptable
-MAX_SIZE = 380          # máximo antes de forzar corte
-OVERLAP_SIZE = 60       # palabras de overlap entre chunks
-PARENT_WINDOW = 3       # cantidad de children por parent chunk
-MAX_PARENT_WORDS = 1200 # máximo de palabras por parent
-STRUCTURE_PATTERNS = {
-    "farreras-2020": {
-        "capitulo": [
-            r'^SECCIÓN\s+[IVXLCDM]+\b',
-            r'^Capítulo\s+\d+',
-            r'^CAPÍTULO\s+\d+',
-        ],
-        "seccion": [
-            r'^\d+\.\d+[\s\.]+[A-ZÁÉÍÓÚÑ]',    # 23.4 Glaucoma...
-            r'^[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{5,60}$', # MODELOS DE REGRESIÓN (línea sola en mayúsculas)
-        ],
-    },
-    "garcia-feijoo-2012": {
-        "capitulo": [
-            r'PA\s*R\s*T\s*E\s+\d+',             # PA R T E 1 : BÁSICO
-            r'^PARTE\s+\d+',
-        ],
-        "seccion": [
-            r'^\d+\s*\|\s*.+',                    # 1 | Embriología. Desarrollo...
-            r'^\d+\.\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{3,}',  # 1. Embriología... (requiere palabra real, no "3. Mixto.")
-        ],
-    },
-    "diamante-orl": {
-        "capitulo": [
-            r'^SECCIÓN\s+[IVXLCDM]+',
-            r'^Sección\s+[IVXLCDM]+',
-            r'^CAPÍTULO\s+\d+',
-        ],
-        "seccion": [
-            r'^\d+\.\s+[A-ZÁÉÍÓÚÑ]',
-            r'^[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{5,50}$',
-        ],
-    },
-    "_default": {
-        "capitulo": [
-            r'^SECCIÓN\s+[IVXLCDM]+',
-            r'^CAPÍTULO\s+\d+',
-            r'^Capítulo\s+\d+',
-            r'^PARTE\s+\d+',
-        ],
-        "seccion": [
-            r'^\d+\.\d+[\s\.]+[A-ZÁÉÍÓÚÑ]',
-            r'^[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{5,60}$',
-        ],
-    },
-}
+# Los parametros de chunkeo y los patrones de estructura viven en pipeline/estrategia.py:
+# son del DOMINIO, no del codigo. Se re-exportan con los nombres de siempre para no romper a
+# quien los importe (parser_v2 y los tests los usan).
+from pipeline.estrategia import (  # noqa: E402, F401  (re-export deliberado)
+    MAX_PARENT_WORDS,
+    MAX_SIZE,
+    MIN_SIZE,
+    OVERLAP_SIZE,
+    PARENT_WINDOW,
+    POR_DEFECTO,
+    TARGET_SIZE,
+    Estrategia,
+)
+from pipeline.estrategia import PATRONES_MEDICINA as STRUCTURE_PATTERNS  # noqa: E402, F401
+
 MIN_FILAS_TABLA = 2
 MIN_COLS_TABLA = 2
 SOLAPE_BLOQUE_TABLA = 0.5          # fraccion del bloque que debe caer dentro de la tabla
@@ -321,7 +284,7 @@ def _clean_spaced_text(text: str) -> str:
     return result
 
 
-def detect_structure(pages: list, libro_id: str) -> list:
+def detect_structure(pages: list, libro_id: str, estrategia: Estrategia = POR_DEFECTO) -> list:
     """Detecta títulos de capítulo y sección en las páginas.
 
     Args:
@@ -331,7 +294,8 @@ def detect_structure(pages: list, libro_id: str) -> list:
     Returns:
         Lista de {page, text, titulo_capitulo, titulo_seccion}
     """
-    patterns = STRUCTURE_PATTERNS.get(libro_id, STRUCTURE_PATTERNS["_default"])
+    # Los patrones son del DOMINIO (pipeline/estrategia.py), no de este archivo.
+    patterns = estrategia.patrones_de(libro_id)
     cap_patterns = [re.compile(p, re.MULTILINE) for p in patterns["capitulo"]]
     sec_patterns = [re.compile(p, re.MULTILINE) for p in patterns["seccion"]]
 
@@ -404,19 +368,26 @@ def _find_sentence_boundary(words: list, target_idx: int) -> int:
 
 
 def generate_chunks_v2(structured_pages: list, libro_id: str,
-                       target_size: int = TARGET_SIZE,
-                       overlap: int = OVERLAP_SIZE) -> tuple:
+                       target_size: int | None = None,
+                       overlap: int | None = None,
+                       estrategia: Estrategia = POR_DEFECTO) -> tuple:
     """Genera child chunks y parent chunks a partir de páginas estructuradas.
 
     Args:
         structured_pages: Lista de {page, text, titulo_capitulo, titulo_seccion}
         libro_id: ID del libro
-        target_size: Palabras objetivo por chunk (default 280)
-        overlap: Palabras de overlap (default 60)
+        target_size: Palabras objetivo por chunk. None = lo que diga la estrategia.
+        overlap: Palabras de solape. None = lo que diga la estrategia.
+        estrategia: Estrategia del dominio (tamaños). Default: la de medicina de siempre.
 
     Returns:
         (child_chunks, parent_chunks)
+
+    `target_size` y `overlap` siguen aceptandose sueltos porque hay llamadores viejos que los
+    pasan; cuando vienen, ganan sobre la estrategia (override puntual de una corrida).
     """
+    target_size = estrategia.target_size if target_size is None else target_size
+    overlap = estrategia.overlap if overlap is None else overlap
     # Construir un buffer continuo con metadata por página
     all_words = []       # Lista plana de palabras
     word_meta = []       # Metadata por palabra: (page, capitulo, seccion)
@@ -451,13 +422,13 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             end = _find_sentence_boundary(all_words, end_target)
 
             # Si el chunk es demasiado grande, forzar corte
-            if end - pos > MAX_SIZE:
-                end = _find_sentence_boundary(all_words, pos + MAX_SIZE)
-                if end - pos > MAX_SIZE + 50:
-                    end = pos + MAX_SIZE  # Corte duro como último recurso
+            if end - pos > estrategia.max_size:
+                end = _find_sentence_boundary(all_words, pos + estrategia.max_size)
+                if end - pos > estrategia.max_size + 50:
+                    end = pos + estrategia.max_size  # Corte duro como último recurso
 
         # Chunk demasiado pequeño al final: merge con anterior
-        if end - pos < MIN_SIZE and children:
+        if end - pos < estrategia.min_size and children:
             prev = children[-1]
             prev["text"] = prev["text"] + " " + " ".join(all_words[pos:end])
             prev["word_count"] = len(prev["text"].split())
@@ -504,13 +475,13 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             next_pos = end  # Evitar loop infinito
         pos = next_pos
 
-    # Generar parent chunks (ventana de PARENT_WINDOW children)
+    # Generar parent chunks (ventana de parent_window children)
     parents = []
     parent_idx = 0
     i = 0
 
     while i < len(children):
-        window_end = min(i + PARENT_WINDOW, len(children))
+        window_end = min(i + estrategia.parent_window, len(children))
         window = children[i:window_end]
 
         # Concatenar textos de los children (sin overlap duplicado)
@@ -529,9 +500,9 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
         parent_words = len(parent_text.split())
 
         # Si el parent es muy grande, solo tomar lo necesario
-        if parent_words > MAX_PARENT_WORDS:
-            parent_text = " ".join(parent_text.split()[:MAX_PARENT_WORDS])
-            parent_words = MAX_PARENT_WORDS
+        if parent_words > estrategia.max_parent_words:
+            parent_text = " ".join(parent_text.split()[:estrategia.max_parent_words])
+            parent_words = estrategia.max_parent_words
 
         parent_id = f"{libro_id}_v2_parent_{parent_idx:05d}"
 
@@ -553,17 +524,19 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             child["parent_id"] = parent_id
 
         parent_idx += 1
-        i += PARENT_WINDOW
+        i += estrategia.parent_window
 
     return children, parents
 
 
-def parse_pdf_v2(pdf_path: str, libro_id: str) -> tuple:
+def parse_pdf_v2(pdf_path: str, libro_id: str, estrategia: Estrategia = POR_DEFECTO) -> tuple:
     """Parsea un PDF completo a chunks v2.
 
     Args:
         pdf_path: Ruta al archivo PDF
         libro_id: ID del libro
+        estrategia: Como parsear y chunkear este material (pipeline/estrategia.py).
+            El default es medicina, o sea el comportamiento historico.
 
     Returns:
         (children, parents) — listas de dicts
@@ -590,10 +563,10 @@ def parse_pdf_v2(pdf_path: str, libro_id: str) -> tuple:
     print(f"  {len(pages)} páginas con texto extraído")
 
     # Detectar estructura
-    structured = detect_structure(pages, libro_id)
+    structured = detect_structure(pages, libro_id, estrategia)
 
     # Generar chunks
-    children, parents = generate_chunks_v2(structured, libro_id)
+    children, parents = generate_chunks_v2(structured, libro_id, estrategia=estrategia)
     print(f"  Resultado: {len(children)} children, {len(parents)} parents")
 
     return children, parents
