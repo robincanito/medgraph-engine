@@ -64,6 +64,33 @@ def search_semantic(query_text: str, top_k: int = 40, libro_id: str = None) -> l
     return results
 
 
+# La sintaxis del QueryParser clásico de Lucene: ninguno de estos caracteres puede llegar crudo
+# desde una consulta de usuario.
+_SINTAXIS_LUCENE = str.maketrans({c: " " for c in '+-&|!(){}[]^"~*?:\\/'})
+
+
+def _terminos_lucene(texto: str) -> str:
+    """Consulta de usuario -> términos planos, sin sintaxis que Lucene reinterprete.
+
+    BUG 2026-09-10, encontrado al medir el retrieval con un conjunto de evaluación real: 37 de 101
+    consultas traían caracteres de sintaxis Lucene y el texto iba crudo al parser. Dos modos de
+    falla, y el segundo es el peligroso:
+
+      · `/` y `[ ]` -> excepción del parser. `search_hybrid` la atrapa, descarta la mitad keyword
+        y sigue con semántica sola.
+      · `:` -> NO da error: Lucene lo lee como `campo:término`. "sindrome: condensacion pulmonar"
+        pasa a ser "buscá 'condensacion' en el campo 'sindrome'", campo que no existe, así que el
+        término se pierde y queda sólo "pulmonar". Devuelve resultados plausibles de las fuentes
+        equivocadas sin una sola señal de que algo salió mal.
+
+    Se reemplaza por espacio en vez de escapar con `\\` porque el analizador del índice
+    (`standard-no-stop-words`, tokenizer UAX#29) ya descarta la puntuación AL INDEXAR: los tokens
+    guardados nunca tienen `:` ni `-`. Partir en espacios es exactamente esa tokenización --
+    "anti-inflamatorios" -> "anti inflamatorios", el par que el índice realmente contiene.
+    """
+    return " ".join(texto.translate(_SINTAXIS_LUCENE).split())
+
+
 def search_keyword(query_text: str, top_k: int = 40, libro_id: str = None) -> list:
     """Búsqueda full-text con scoring BM25 sobre Chunk.text (Lucene via Neo4j)."""
     if not query_text.strip():
@@ -71,8 +98,10 @@ def search_keyword(query_text: str, top_k: int = 40, libro_id: str = None) -> li
 
     # Lucene query: OR entre términos para mayor recall,
     # el scoring BM25 se encarga de rankear mejor los que tienen más matches
-    terms = query_text.strip().split()
-    lucene_query = " ".join(terms)  # OR implícito en Lucene
+    lucene_query = _terminos_lucene(query_text)  # OR implícito en Lucene
+    if not lucene_query:
+        # La consulta era pura sintaxis. Mandarla vacía hace explotar el parser.
+        return []
 
     params = {"query": lucene_query, "top_k": top_k}
 
