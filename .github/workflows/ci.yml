@@ -1,0 +1,52 @@
+# CI del engine: los dos gates que tiene que pasar todo push y todo PR.
+#
+#   - la suite ENTERA pasa (doctrina de baseline: todo delta es "+N passed, 0 failed");
+#   - el lint del alcance acotado pasa (ruff.toml explica QUE queda afuera y por que; el
+#     alcance en si son los argumentos de `ruff check` de abajo);
+#   - CERO KEYS y CERO RED: no hay un solo secret en el job. La suite no habla con ningun
+#     proveedor ni con ningun Neo4j —los dobles estan en los tests— y los que algun dia lo
+#     hagan llevan marker `integration` o `neo4j`, que pytest.ini deselecciona. CI no puede
+#     gastarle una key a nadie;
+#   - `concurrency` con cancel-in-progress: la unica verdad es el ultimo commit del branch.
+#
+# Sin `services: neo4j` a proposito: en este repo no hay ningun test que necesite un grafo vivo.
+# Cuando haya uno (marker `neo4j`, contra el docker-compose.yml de prueba, NUNCA contra un grafo
+# con corpus), se agrega el service y un `pytest -m neo4j` con su propia variable de conexion.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: ruff + pytest (Python 3.13)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Dependencias (pipeline + suite; ruff y pytest van en requirements.txt)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint (alcance acotado, ver ruff.toml)
+        run: ruff check pipeline tests parser_v2.py migrate_chunks.py
+
+      - name: Suite
+        # Sin .env y sin keys: los tests siembran valores falsos en tests/conftest.py.
+        run: pytest

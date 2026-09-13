@@ -1,8 +1,17 @@
-"""Basic tests for MedGraph Engine core components."""
+"""Basic tests for the root scripts that are NOT part of the mirrored pipeline.
+
+Kept from v1.0 (and still green): it covers `extract_entities.py` and `dedup_entities.py` —
+the entity-extraction and deduplication steps, which have no counterpart under `pipeline/` and
+are this repo's own code — plus the chunking constants re-exported by `parser_v2.py` and a few
+hygiene checks (no real credentials in `.env.example` or `docker-compose.yml`).
+
+The regression suite for the mirrored pipeline lives in `test_pipeline_*.py`; repo-wide health
+(everything parses, every dependency declared, no secrets) lives in `test_repo.py`.
+"""
 
 import os
 import sys
-import json
+
 import pytest
 
 # Add parent dir to path
@@ -57,7 +66,7 @@ class TestChunking:
     """Test chunking parameters and structure."""
 
     def test_chunk_config_values(self):
-        from parser_v2 import TARGET_SIZE, MIN_SIZE, MAX_SIZE, OVERLAP_SIZE
+        from parser_v2 import MAX_SIZE, MIN_SIZE, OVERLAP_SIZE, TARGET_SIZE
         assert TARGET_SIZE == 280
         assert MIN_SIZE == 150
         assert MAX_SIZE == 380
@@ -65,7 +74,7 @@ class TestChunking:
         assert MIN_SIZE < TARGET_SIZE < MAX_SIZE
 
     def test_parent_config(self):
-        from parser_v2 import PARENT_WINDOW, MAX_PARENT_WORDS
+        from parser_v2 import MAX_PARENT_WORDS, PARENT_WINDOW
         assert PARENT_WINDOW == 3
         assert MAX_PARENT_WORDS == 1200
 

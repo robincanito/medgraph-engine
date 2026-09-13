@@ -149,7 +149,10 @@ async def medgraph_cronograma(semana_numero: int = 0) -> str:
         if semana_numero > 0:
             params["semana_numero"] = semana_numero
         r = await client.get(
-            f"{SCHEDULE_API_URL}/api/v1/cronograma" # Configure your schedule API,
+            # Point SCHEDULE_API_URL at your own schedule API; this route is not part of the
+            # MedGraph API. (The comma below went missing when the private URL was redacted for
+            # the v1.0 release, and this file has not parsed since — see tests/test_repo.py.)
+            f"{SCHEDULE_API_URL}/api/v1/cronograma",
             headers=SCHEDULE_HEADERS,
             params=params,
         )

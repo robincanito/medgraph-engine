@@ -1,3 +1,12 @@
-neo4j>=5.0
-pymupdf>=1.24
-python-dotenv>=1.0
+# MedGraph Engine — runtime dependencies of the ingestion pipeline and the root scripts.
+# The API has its own set in api/requirements.txt (FastAPI, uvicorn, slowapi...).
+neo4j>=5.0            # graph driver (db.py, pipeline/carga.py callers)
+pymupdf>=1.24         # PDF text and table extraction (pipeline/parseo.py)
+python-dotenv>=1.0    # reads .env
+pyyaml>=6.0           # domain profiles: profiles/*.yaml via pipeline/perfiles.py
+google-genai>=1.0     # embedding provider (lazy import in pipeline/embeddings.crear_cliente)
+
+# Dev and CI. They live here on purpose: this repo has no requirements-dev.txt, and the CI job
+# installs ONE file and then runs both gates (ruff, then pytest). Neither is imported at runtime.
+pytest>=8.0
+ruff>=0.6
