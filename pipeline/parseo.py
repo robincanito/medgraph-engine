@@ -318,22 +318,50 @@ def classify_content_type(text: str) -> str:
     return "body"
 
 
+# Letras sueltas separadas por un espacio: al menos 2 pares "letra espacio" seguidos de una
+# letra final. Compilado al importar porque `_clean_spaced_text` corre por LINEA de titulo.
+LETRA_SUELTA = r'[A-ZÁÉÍÓÚÑa-záéíóúñ]'
+RE_TEXTO_ESPACIADO = re.compile(rf'({LETRA_SUELTA} ){{2,}}{LETRA_SUELTA}')
+_RE_ES_LETRA = re.compile(LETRA_SUELTA)
+
+# Cuantas letras de la corrida tienen que estar SUELTAS (sin otra letra pegada ni antes ni
+# despues) para tratarla como texto espaciado. DOS, y el numero es el hallazgo P11 de la QA
+# (13-sep-2026): el patron de arriba tambien matchea "ultima letra de una palabra + palabra
+# española de UNA letra + primera letra de la siguiente", y por eso
+# "Capítulo 2. Fisiopatología y mecanismos" salia "Capítulo 2. Fisiopatologíaymecanismos" en
+# el titulo de capitulo de todo libro con una "y" (o una "o", una "u", una "a", una "e") en el
+# titulo. En esa corrida -"a y m"- hay UNA letra suelta, la "y"; en "A R T E" (de "PA R T E")
+# hay TRES, y por eso se compacta junto con la "A" pegada a la "P" y da "PARTE".
+#
+# LO QUE SIGUE SIN RESOLVER, y es una ambiguedad real: "Vitaminas A y D en el adulto" colapsa
+# igual ("VitaminasAyDen"), porque son tres letras sueltas seguidas. Sin diccionario no hay
+# forma de distinguirlo mirando solo los caracteres; un humano tampoco puede.
+MIN_LETRAS_SUELTAS = 2
+
+
 def _clean_spaced_text(text: str) -> str:
     """Reconstruye texto con letras espaciadas del PDF.
 
     "PA R T E 3 : A M E T R O P Í A S" → "PARTE 3 : AMETROPÍAS"
     "B Á S I C O" → "BÁSICO"
+
+    Una palabra española de una sola letra entre palabras normales NO es texto espaciado:
+    "Fisiopatología y mecanismos" queda igual (ver MIN_LETRAS_SUELTAS).
     """
-    # Buscar secuencias donde hay letras sueltas separadas por un espacio
-    # Patrón: al menos 2 pares de "letra espacio" seguidos de una letra final
-    letter = r'[A-ZÁÉÍÓÚÑa-záéíóúñ]'
-    pattern = rf'({letter} ){{2,}}{letter}'
-
     def collapse_spaced(match):
-        return match.group(0).replace(' ', '')
+        crudo = match.group(0)
+        # La corrida es "L L L ...": una letra cada dos caracteres.
+        sueltas = (len(crudo) + 1) // 2
+        inicio, fin = match.start(), match.end()
+        if inicio > 0 and _RE_ES_LETRA.match(text[inicio - 1]):
+            sueltas -= 1   # la primera letra es la cola de una palabra normal
+        if fin < len(text) and _RE_ES_LETRA.match(text[fin]):
+            sueltas -= 1   # la ultima es la cabeza de la palabra siguiente
+        if sueltas < MIN_LETRAS_SUELTAS:
+            return crudo
+        return crudo.replace(' ', '')
 
-    result = re.sub(pattern, collapse_spaced, text)
-    return result
+    return RE_TEXTO_ESPACIADO.sub(collapse_spaced, text)
 
 
 def detect_structure(pages: list, libro_id: str, estrategia: Estrategia = POR_DEFECTO) -> list:
