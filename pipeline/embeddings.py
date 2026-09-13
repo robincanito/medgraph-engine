@@ -223,3 +223,53 @@ def vectorizar_faltantes(query, write, client, libro_id, on_progress=None, *, lo
                     f"({lotes_fallidos} lotes fallidos, {pagadas['llamadas']} llamadas pagas)")
     return {"embebidos": embebidos, "sin_vector": sin_vector,
             "lotes_fallidos": lotes_fallidos, "llamadas": pagadas["llamadas"]}
+
+
+#: Pasadas maximas de `vectorizar_libro`. DOS, y el numero tiene un porque: la primera paga la
+#: politica completa de reintentos por lote (3 intentos con espera 5/10 s), asi que una falla
+#: que sobrevive a eso no es un hipo de red -- es una caida del proveedor o una cuota agotada--.
+#: La segunda pasada existe para el caso en que la caida termino MIENTRAS corria el resto del
+#: libro: los lotes siguientes tardaron y cuando se vuelve a mirar el proveedor ya contesta. Una
+#: tercera pasada seria esperar sentado, y eso es trabajo del re-vectorizado a pedido, que ya
+#: existe como endpoint (POST /admin/v1/sources/{id}/vectorize) y lo decide una persona.
+PASADAS = 2
+
+
+def vectorizar_libro(query, write, client, libro_id, *, pasadas: int = PASADAS,
+                     on_progress=None, log=None, **kw) -> dict:
+    """`vectorizar_faltantes` con SEGUNDA PASADA de los que quedaron sin vector.
+
+    POR QUE EXISTE (13-sep-2026, decision C de la QA). El banco encontro que un libro al que
+    le faltaban 9 de 19 vectores terminaba en `loaded` -- el terminal de EXITO del contrato--
+    y que NADIE volvia a pedir esos 9: un lote perdido por un 5xx quedaba perdido para siempre
+    y el unico rastro era la metrica `sin_vector`. La politica aprobada es "re-encolar los
+    faltantes + la consola lo ve + re-vectorizar a pedido", sin estado nuevo en job/v1.
+
+    ESTA ES LA UNICA POLITICA, para el CLI y para la API. La lleva `pipeline/` y no cada
+    orquestador porque la deuda que se pago en septiembre fue exactamente esa: dos bucles de
+    vectorizacion con distintos reintentos, y el mismo documento terminaba con distinto numero
+    de embeddings segun por donde entro (agujero G3 del diseno).
+
+    LO QUE NO HACE: re-embeber nada. La segunda pasada vuelve a preguntarle al grafo que falta
+    (`CYPHER_CHUNKS_SIN_EMBEDDING`), asi que un libro completo la salta sin pagar UNA SOLA
+    llamada -- la invariante D10 del banco lo exige-- y un libro a medias paga solo el resto.
+
+    Devuelve la suma de las pasadas: `embebidos`, `lotes_fallidos` y `llamadas` sumados,
+    `sin_vector` el de la ULTIMA pasada (es cuantos quedaron, no cuantos faltaron alguna vez),
+    y `pasadas` = cuantas corrieron de verdad.
+    """
+    log = log if log is not None else logging.getLogger(__name__)
+    total = {"embebidos": 0, "sin_vector": 0, "lotes_fallidos": 0, "llamadas": 0, "pasadas": 0}
+    for n in range(1, max(1, pasadas) + 1):
+        r = vectorizar_faltantes(query, write, client, libro_id,
+                                 on_progress=on_progress, log=log, **kw)
+        total["pasadas"] = n
+        for clave in ("embebidos", "lotes_fallidos", "llamadas"):
+            total[clave] += r[clave]
+        total["sin_vector"] = r["sin_vector"]
+        if r["sin_vector"] == 0:
+            break
+        if n < max(1, pasadas):
+            log.warning(f"{libro_id}: quedaron {r['sin_vector']} chunks sin vector; "
+                        f"segunda pasada sobre los faltantes")
+    return total
