@@ -1,0 +1,90 @@
+# Perfil de dominio: material GENERICO — el dominio "otros" (Nomos / MedGraph)
+# Fuente: el default historico del pipeline. Los patrones de `parse` y los seis numeros de
+# `chunk` se VOLCARON desde `pipeline/estrategia.py` (PATRONES_MEDICINA["_default"] y las
+# constantes TARGET_SIZE..MAX_PARENT_WORDS), no se retipearon: retipear un regex con acentos y
+# backslashes es como se pierde un acento sin que nadie lo vea.
+#
+# POR QUE EXISTE ESTE ARCHIVO (decision de Ivan, 13-sep-2026; §8 punto 6 de
+# docs/DISENO-qa-pipeline-13sep.md). Hasta hoy un documento que no era de medicina ni de derecho
+# se procesaba "sin perfil", y sin perfil rige el default del codigo, que es EL DE MEDICINA: 280
+# palabras por chunk, solape 60, y los patrones de capitulo de un tratado. Funcionaba, pero por
+# omision. Un perfil explicito convierte esa omision en una declaracion: el material generico se
+# procesa asi PORQUE ESTA ESCRITO, y el dia que se decida otra cosa se cambia acá y se bumpea
+# `version`, en vez de descubrir que "el default" ya no era lo que alguien creia.
+#
+# Lo que NO hace: tocar `perfiles.POR_DEFECTO` (sigue siendo `medicina`, el dominio de esta
+# instancia). Este perfil se pide por nombre: `perfiles.estrategia("generico")`.
+profile: generico
+version: 1
+language: es
+
+graph:
+  target: medgraph            # resuelve a secret neo4j-uri
+  name_property: name         # dominios nuevos usan `name`; medicina arrastra `nombre` por legado
+
+# TAXONOMIA MINIMA Y DOMAIN-NEUTRAL, a proposito. Tres tipos de entidad y dos de relacion que
+# valen igual en un manual tecnico, una norma ISO o un apunte de contabilidad. La tentacion es
+# poner quince tipos "por si acaso": un vocabulario grande que nadie valido produce extraccion
+# ruidosa y despues nadie sabe si el tipo esta mal o el texto. Un dominio que necesite mas
+# precision no estira este perfil: escribe el suyo, que es justamente lo que el formato permite.
+entities:
+  - id: concepto
+    label: Concepto
+    desc: "nociones, terminos definidos, magnitudes: caudal, prescripcion, amortizacion, cebado"
+  - id: procedimiento
+    label: Procedimiento
+    desc: "operaciones y pasos: puesta en marcha, calibracion, inscripcion, cierre de ejercicio"
+  - id: organizacion
+    label: Organizacion
+    desc: "organismos, empresas y areas: fabricante, autoridad de aplicacion, area de mantenimiento"
+
+# Dos relaciones, las dos con extremos abiertos: sin un dominio concreto no hay forma de
+# restringir `from`/`to` sin inventar. Los ids van en MAYUSCULAS como en medicina y derecho (son
+# el tipo de la relacion en el grafo: `(a)-[:PARTE_DE]->(b)`); PARTE_DE es el mismo id que ya
+# usan los otros dos perfiles, y eso es deliberado: una consulta que recorre jerarquias no
+# tiene que aprender un nombre nuevo por dominio.
+relations:
+  - id: RELACIONADO_CON      # asociacion inespecifica; es la unica honesta sin dominio
+    from: [concepto, procedimiento, organizacion]
+    to: [concepto, procedimiento, organizacion]
+  - id: PARTE_DE
+    from: [concepto, procedimiento, organizacion]
+    to: [concepto, procedimiento, organizacion]
+
+# Como se PARSEA y se CHUNKEA el material generico: el default historico, tal cual. Es la razon
+# por la que este perfil no cambia NADA del comportamiento actual — `perfiles.estrategia("generico")`
+# da un objeto igual a `estrategia.POR_DEFECTO`, y hay un test que lo fija.
+parse:
+  structure_patterns:
+    capitulo:
+    - ^SECCIÓN\s+[IVXLCDM]+
+    - ^CAPÍTULO\s+\d+
+    - ^Capítulo\s+\d+
+    - ^PARTE\s+\d+
+    seccion:
+    - ^\d+\.\d+[\s\.]+[A-ZÁÉÍÓÚÑ]
+    - ^[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{5,60}$
+
+chunk:
+  target_size: 280
+  min_size: 150
+  max_size: 380
+  overlap: 60
+  parent_window: 3
+  max_parent_words: 1200
+
+extraction:
+  model: gemini-3.1-flash-lite
+  batch_size: 3
+  min_words: 100
+  prompt_template: prompts/generico.md
+  rules: |
+    - Nombres canonicos en español, en minuscula y en singular.
+    - Extraer solo entidades que el texto NOMBRA; no inferir las que estan implicitas.
+    - No extraer cifras, fechas, codigos de norma ni unidades como entidades.
+    - Las relaciones deben conectar entidades presentes en el MISMO fragmento; NO inventar.
+    - Ante la duda sobre el tipo, usar `concepto`: es preferible un tipo laxo a uno inventado.
+
+canonicalization:
+  merge_synonyms: true
+  min_name_length: 2
