@@ -365,14 +365,43 @@ def _clean_spaced_text(text: str) -> str:
 
 
 def detect_structure(pages: list, libro_id: str, estrategia: Estrategia = POR_DEFECTO) -> list:
-    """Detecta títulos de capítulo y sección en las páginas.
+    """Detecta títulos de capítulo y sección en las páginas, POR POSICIÓN.
 
     Args:
         pages: Lista de {page, text}
         libro_id: ID del libro para seleccionar patrones
 
     Returns:
-        Lista de {page, text, titulo_capitulo, titulo_seccion}
+        Lista de {page, text, titulo_capitulo, titulo_seccion}. Una página con más de un
+        encabezado devuelve VARIAS entradas con el MISMO `page` (ver abajo).
+
+    EL TÍTULO ES DE LA POSICIÓN, NO DE LA PÁGINA (hallazgo P14 del banco de QA, curado el
+    13-sep-2026 por decisión de Iván). Hasta hoy esta función decidía UN
+    `titulo_capitulo`/`titulo_seccion` por página y ganaba el ÚLTIMO encabezado que
+    aparecía en ella; después `generate_chunks_v2` le ponía a cada palabra la metadata de
+    SU PÁGINA. Con dos encabezados en una página —lo normal en un tratado maquetado a dos
+    columnas— el chunk que ARRANCA en "Capítulo 1" salía etiquetado "Capítulo 2", y ese
+    título viaja en el prefijo que se embebe (`pipeline/embeddings.build_embedding_text`):
+    el error no era cosmético, corría el vector.
+
+    LA CURA, Y POR QUÉ ES ASÍ. La página se parte en SEGMENTOS: cada encabezado abre uno
+    nuevo, que arranca en la línea del encabezado (el encabezado pertenece a lo que abre) y
+    llega hasta el siguiente. Cada segmento sale como una entrada propia con el MISMO
+    `page`, así que:
+      - `generate_chunks_v2` no cambia ni una línea: ve "páginas" consecutivas con el mismo
+        número, y `page_start`/`page_end` siguen saliendo del número de página;
+      - el TEXTO no cambia: los segmentos de una página, concatenados, son la página (sólo
+        se descartan los que son puro espacio, que no aportan palabras);
+      - los ids `{libro}_v2_{NNNNN}` siguen siendo secuenciales y los cortes del chunker,
+        los mismos.
+    Lo único que cambia son los títulos. Alternativa descartada: mover la decisión al
+    chunker (buscar el encabezado más cercano hacia atrás desde cada chunk). Sería duplicar
+    el conocimiento de los patrones en dos funciones, y el chunker no ve líneas — trabaja
+    sobre una lista plana de palabras.
+
+    UN SEGMENTO SE ABRE SÓLO CUANDO EL TÍTULO SE ASIGNA DE VERDAD: un patrón de sección que
+    matchea pero no pasa el filtro de "línea corta sin oración" no abre nada, igual que
+    antes no cambiaba el título.
     """
     # Los patrones son del DOMINIO (pipeline/estrategia.py), no de este archivo.
     patterns = estrategia.patrones_de(libro_id)
@@ -386,13 +415,18 @@ def detect_structure(pages: list, libro_id: str, estrategia: Estrategia = POR_DE
     for page_data in pages:
         text = page_data["text"]
         lines = text.split('\n')
+        # [linea donde arranca, capitulo vigente, seccion vigente]. El primero hereda los
+        # títulos de la página anterior: un párrafo partido entre dos páginas sigue
+        # perteneciendo a su capítulo.
+        segmentos = [[0, current_capitulo, current_seccion]]
 
-        for line in lines:
+        for i, line in enumerate(lines):
             line_stripped = line.strip()
             if not line_stripped or len(line_stripped) < 3:
                 continue
 
             # Detectar capítulo
+            is_capitulo = False
             for pat in cap_patterns:
                 if pat.match(line_stripped):
                     # Limpiar: reconstruir texto con espacios intercalados
@@ -401,10 +435,11 @@ def detect_structure(pages: list, libro_id: str, estrategia: Estrategia = POR_DE
                     clean_cap = re.sub(r'\s{2,}', ' ', clean_cap).strip()
                     current_capitulo = clean_cap[:120]
                     current_seccion = ""
+                    is_capitulo = True
                     break
 
             # Detectar sección (solo si no fue detectado como capítulo)
-            is_capitulo = any(pat.match(line_stripped) for pat in cap_patterns)
+            asigno = is_capitulo
             if not is_capitulo:
                 for pat in sec_patterns:
                     if pat.match(line_stripped):
@@ -412,14 +447,30 @@ def detect_structure(pages: list, libro_id: str, estrategia: Estrategia = POR_DE
                         # y no contiene punto seguido de más texto (indica oración, no título)
                         if len(line_stripped) < 80 and line_stripped.count('.') <= 2:
                             current_seccion = line_stripped[:100]
+                            asigno = True
                             break
 
-        structured.append({
-            "page": page_data["page"],
-            "text": text,
-            "titulo_capitulo": current_capitulo,
-            "titulo_seccion": current_seccion,
-        })
+            if not asigno:
+                continue
+            if segmentos[-1][0] == i:
+                # El encabezado ES la primera línea del segmento en curso (el caso del
+                # encabezado al tope de la página): se le corrigen los títulos en vez de
+                # abrir un segmento vacío.
+                segmentos[-1][1:] = [current_capitulo, current_seccion]
+            else:
+                segmentos.append([i, current_capitulo, current_seccion])
+
+        for j, (inicio, cap, sec) in enumerate(segmentos):
+            fin = segmentos[j + 1][0] if j + 1 < len(segmentos) else len(lines)
+            trozo = '\n'.join(lines[inicio:fin])
+            if not trozo.strip():
+                continue   # sólo espacio: no aporta palabras y ensuciaría la lista
+            structured.append({
+                "page": page_data["page"],
+                "text": trozo,
+                "titulo_capitulo": cap,
+                "titulo_seccion": sec,
+            })
 
     return structured
 
