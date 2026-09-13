@@ -17,6 +17,7 @@ El codigo de las funciones es el de parser_v2.py del 6-sep, movido verbatim por 
 `fitz` (PyMuPDF) se importa PEREZOSO dentro de las funciones que lo usan: importarlo al
 cargar el modulo le costaba ~10 s a cada arranque en frio de Cloud Run (1-sep-2026).
 """
+import logging
 import os
 import re
 import unicodedata
@@ -42,6 +43,10 @@ from pipeline.estrategia import PATRONES_MEDICINA as STRUCTURE_PATTERNS  # noqa:
 # el gold de 101 consultas: ocupaban 10 de 1.010 puestos, y en "Obstructivo: EPOC / ASMA" el indice
 # CIE-10 se llevaba 4 de 10. Es UNA tupla para las dos puntas -el parser la produce, vector.py la
 # filtra- porque dos listas divergen y el sintoma seria un tipo nuevo que se marca y no se filtra.
+# Bitacora del paquete: `pipeline/` no usa print (los orquestadores configuran el logging; en
+# Cloud Run el print no lleva severity ni origen). tests/test_bitacora.py lo frena desde el 13-sep.
+log = logging.getLogger(__name__)
+
 NO_CONTENIDO = ("referencias", "indice")
 
 # Una cita bibliografica: "1983;309:45-7", con o sin fasciculo "2018;391(10125):1023" (Lancet numera
@@ -675,7 +680,7 @@ def parse_pdf_v2(pdf_path: str, libro_id: str, estrategia: Estrategia = POR_DEFE
     import fitz  # PyMuPDF: perezoso, le costaba ~10 s al arranque en frio de Cloud Run
     doc = fitz.open(pdf_path)
     total_pages = doc.page_count
-    print(f"  Parseando {os.path.basename(pdf_path)} ({total_pages} págs)...")
+    log.info(f"  Parseando {os.path.basename(pdf_path)} ({total_pages} págs)...")
 
     # Extraer texto por página
     pages = []
@@ -688,17 +693,17 @@ def parse_pdf_v2(pdf_path: str, libro_id: str, estrategia: Estrategia = POR_DEFE
             pages.append({"page": i + 1, "text": text})
 
         if (i + 1) % 500 == 0:
-            print(f"    ... {i + 1}/{total_pages} páginas")
+            log.info(f"    ... {i + 1}/{total_pages} páginas")
 
     doc.close()
-    print(f"  {len(pages)} páginas con texto extraído")
+    log.info(f"  {len(pages)} páginas con texto extraído")
 
     # Detectar estructura
     structured = detect_structure(pages, libro_id, estrategia)
 
     # Generar chunks
     children, parents = generate_chunks_v2(structured, libro_id, estrategia=estrategia)
-    print(f"  Resultado: {len(children)} children, {len(parents)} parents")
+    log.info(f"  Resultado: {len(children)} children, {len(parents)} parents")
 
     return children, parents
 
