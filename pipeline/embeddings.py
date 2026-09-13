@@ -95,7 +95,7 @@ def build_embedding_text(chunk: dict) -> str:
     return f"{prefix}. {chunk['text']}" if prefix else chunk["text"]
 
 
-def generate_embeddings(client, texts: list) -> list:
+def generate_embeddings(client, texts: list, contador: dict | None = None) -> list:
     """Genera embeddings con gemini-embedding-2 via google-genai.
 
     NOTA 2026-06-16: cuando gemini-embedding-2 pasó a GA, el formato
@@ -123,6 +123,9 @@ def generate_embeddings(client, texts: list) -> list:
     # len(vectores) == len(batch).
     vectores = []
     for t in truncated:
+        if contador is not None:
+            # La llamada se cuenta ANTES de hacerla: si revienta, igual se pago.
+            contador["llamadas"] = contador.get("llamadas", 0) + 1
         r = client.models.embed_content(
             model=EMBEDDING_MODEL,
             contents=[{"parts": [{"text": t}]}],
@@ -163,14 +166,18 @@ def vectorizar_faltantes(query, write, client, libro_id, on_progress=None, *, lo
       dormir          inyectable: los tests no esperan 15 segundos de verdad.
 
     Devuelve {"embebidos", "sin_vector", "lotes_fallidos", "llamadas"}. `llamadas` es el eje
-    economico: cuantas veces se llamo a generate_embeddings, reintentos incluidos.
+    economico: cuantas llamadas PAGAS se le hicieron a Vertex -una por texto, porque
+    embedContent acepta un contenido por llamada-, reintentos incluidos y la que revento
+    tambien. La primera version contaba lotes (una por generate_embeddings) y subestimaba el
+    gasto hasta EMBED_BATCH veces: lo destapo el banco de QA (C1/D10, 13-sep-2026).
     """
     log = log if log is not None else logging.getLogger(__name__)
     chunks = query(CYPHER_CHUNKS_SIN_EMBEDDING, {"lid": libro_id})
     if not chunks:
         return {"embebidos": 0, "sin_vector": 0, "lotes_fallidos": 0, "llamadas": 0}
 
-    embebidos = sin_vector = lotes_fallidos = llamadas = 0
+    embebidos = sin_vector = lotes_fallidos = 0
+    pagadas = {"llamadas": 0}
     for i in range(0, len(chunks), lote):
         batch = chunks[i:i + lote]
         textos = [build_embedding_text(c)[:max_chars] for c in batch]
@@ -178,8 +185,7 @@ def vectorizar_faltantes(query, write, client, libro_id, on_progress=None, *, lo
         for intento in range(1, reintentos + 1):
             arranque = time.perf_counter()
             try:
-                llamadas += 1
-                vectores = generate_embeddings(client, textos)
+                vectores = generate_embeddings(client, textos, contador=pagadas)
                 if len(vectores) != len(batch):
                     raise RuntimeError(
                         f"la API devolvio {len(vectores)} embeddings para {len(batch)} "
@@ -214,6 +220,6 @@ def vectorizar_faltantes(query, write, client, libro_id, on_progress=None, *, lo
 
     if sin_vector:
         log.warning(f"{libro_id}: {embebidos} embeddings, {sin_vector} chunks SIN vector "
-                    f"({lotes_fallidos} lotes fallidos, {llamadas} llamadas)")
+                    f"({lotes_fallidos} lotes fallidos, {pagadas['llamadas']} llamadas pagas)")
     return {"embebidos": embebidos, "sin_vector": sin_vector,
-            "lotes_fallidos": lotes_fallidos, "llamadas": llamadas}
+            "lotes_fallidos": lotes_fallidos, "llamadas": pagadas["llamadas"]}
