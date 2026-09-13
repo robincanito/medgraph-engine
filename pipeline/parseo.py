@@ -37,6 +37,46 @@ from pipeline.estrategia import (  # noqa: E402, F401  (re-export deliberado)
 )
 from pipeline.estrategia import PATRONES_MEDICINA as STRUCTURE_PATTERNS  # noqa: E402, F401
 
+# LO QUE NO ES CONTENIDO (13-sep-2026, item 18 del roadmap). Tipos de chunk que el retrieval
+# EXCLUYE: compiten por el top-10 con densidad de termino y sin decir nada. Medido el 12-sep sobre
+# el gold de 101 consultas: ocupaban 10 de 1.010 puestos, y en "Obstructivo: EPOC / ASMA" el indice
+# CIE-10 se llevaba 4 de 10. Es UNA tupla para las dos puntas -el parser la produce, vector.py la
+# filtra- porque dos listas divergen y el sintoma seria un tipo nuevo que se marca y no se filtra.
+NO_CONTENIDO = ("referencias", "indice")
+
+# Una cita bibliografica: "1983;309:45-7", con o sin fasciculo "2018;391(10125):1023" (Lancet numera
+# sus fasciculos con CINCO digitos: el test lo cazo con \d{1,4}). El fasciculo
+# NO es opcional en la practica: sin el, DeVita -que cita asi- pasaba de 2.322 chunks a 292, y la
+# medicion del 10-sep (4.517) no se podia reproducir. Un detector sin su regex anotada es un numero
+# que nadie puede volver a obtener.
+CITA_BIBLIOGRAFICA = re.compile(
+    r"\b(?:1[89]|20)\d{2}\s?;\s?\d{1,4}(?:\s?\(\d{1,5}\))?\s?:\s?[A-Za-z]?\d{1,5}\b")
+# >= 8 citas en un chunk de ~281 palabras (~una cada 35) no deja lugar para prosa, y la primera en
+# el primer cuarto dice que el chunk ES la lista, no un parrafo que termina en ella. Los dos juntos
+# separan las listas PURAS (2.337 chunks) de las MIXTAS (1.795): las mixtas son prosa clinica con
+# la bibliografia del capitulo colgada al final -"...riesgo de provocar una fibrilacion
+# ventricular..." con 5 citas-, y marcarlas enteras habria borrado ~466 chunks-equivalentes de
+# texto real. Esas se arreglan cortando la seccion en su frontera, en el parseo; no aca.
+MIN_CITAS_REFERENCIAS = 8
+INICIO_MAX_REFERENCIAS = 0.25
+
+# Un codigo de clasificacion tipo CIE-10: "J10.08", "O9A", "E11". El indice CIE-10 del corpus
+# (libro `cie10`, 448 chunks) es un MANUAL DE CODIFICACION: reglas en prosa mezcladas con tablas de
+# codigos, mediana 9 codigos por chunk. Medido el 13-sep-2026: fuera de ese libro, en 3.000 chunks
+# con algun token parecido a un codigo, CERO llegan a 8. El umbral separa la parte enumerativa (la
+# que se llevaba 4 de 10 puestos en "Obstructivo: EPOC / ASMA") sin tocar prosa clinica de nadie.
+# Es una regla de CONTENIDO y no "todo el libro cie10 es indice" a proposito: no necesita tocar el
+# perfil ni el contrato, y vale igual para una tabla ATC o SNOMED que aparezca en otro libro.
+# CON PUNTO OBLIGATORIO, y esto se pago con una inspeccion (13-sep-2026): la forma corta "X00" choca
+# con medio vocabulario medico -B12 (la vitamina, 9 veces en un chunk de Robbins), P53/P16/P21 (los
+# oncogenes en Farreras), C16/C18 (acilcarnitinas en Meneghello), P90 (percentiles del PRUNAPE),
+# A10-A16 (serotipos), "C D13" (CD13 partido por el PDF)-. Con ella, 30 chunks de contenido clinico
+# real quedaban marcados como indice fuera de `cie10`. La subcategoria con punto (J10.08, C38.1,
+# A04.3) no la escribe nadie que no este codificando: los dos indices legitimos que aparecieron
+# fuera de cie10 (el manual de notificacion obligatoria del SIAJ, la tabla de la OMS) la usan.
+CODIGO_CLASIFICACION = re.compile(r"\b[A-Z]\d{2}\.\d{1,2}\b")
+MIN_CODIGOS_INDICE = 8
+
 MIN_FILAS_TABLA = 2
 MIN_COLS_TABLA = 2
 SOLAPE_BLOQUE_TABLA = 0.5          # fraccion del bloque que debe caer dentro de la tabla
@@ -248,6 +288,18 @@ def classify_content_type(text: str) -> str:
     lines = text.strip().split('\n')
     if not lines:
         return "body"
+
+    # Lista de referencias bibliograficas: ver NO_CONTENIDO y CITA_BIBLIOGRAFICA arriba. Va PRIMERO
+    # porque una lista de citas tambien tiene la firma de "lista" y a veces la de "tabla".
+    citas = CITA_BIBLIOGRAFICA.findall(text)
+    if len(citas) >= MIN_CITAS_REFERENCIAS:
+        primera = CITA_BIBLIOGRAFICA.search(text).start() / max(len(text), 1)
+        if primera < INICIO_MAX_REFERENCIAS:
+            return "referencias"
+
+    # Tabla o indice de codigos de clasificacion: ver CODIGO_CLASIFICACION arriba.
+    if len(CODIGO_CLASIFICACION.findall(text)) >= MIN_CODIGOS_INDICE:
+        return "indice"
 
     # Tablas: filas emitidas por render_tabla -> "valor (COLUMNA); valor (COLUMNA)."
     if len(re.findall(r'\([^()]{2,40}\);', text)) >= 3:
