@@ -38,10 +38,11 @@ services:
   # http://localhost:8000
   # Docs: http://localhost:8000/docs
   api:
+    # Context = the repo root: the image needs api/ AND pipeline/ AND profiles/ (see Dockerfile).
     build:
-      context: ./api
+      context: .
       dockerfile: Dockerfile
-    container_name: medgraph-api
+    container_name: medgraph-engine-api
     ports:
       - "8000:8080"
     environment:

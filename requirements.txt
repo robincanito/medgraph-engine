@@ -10,3 +10,8 @@ google-genai>=1.0     # embedding provider (lazy import in pipeline/embeddings.c
 # installs ONE file and then runs both gates (ruff, then pytest). Neither is imported at runtime.
 pytest>=8.0
 ruff>=0.6
+# tests/test_admin_v1.py boots the API with TestClient (httpx is the transport Starlette uses)
+# and validates every admin/v1 response against the contract's JSON Schemas. Test-only: the API
+# image (api/requirements.txt) does not carry them.
+httpx>=0.27
+jsonschema>=4.20

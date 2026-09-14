@@ -74,16 +74,45 @@ class TestDependenciasDeclaradas:
         return paquetes
 
     @pytest.mark.parametrize("paquete", ["neo4j", "pymupdf", "python-dotenv", "pyyaml",
-                                         "pytest", "ruff"])
+                                         "pytest", "ruff", "httpx", "jsonschema"])
     def test_requirements_declara_lo_que_la_suite_y_el_pipeline_usan(self, paquete):
         """`pyyaml` lo importa `pipeline/perfiles.py` (perezoso, pero sin el no hay perfil),
-        `pytest` y `ruff` son el gate de CI, y los otros tres son el pipeline."""
+        `pytest` y `ruff` son el gate de CI, `httpx` y `jsonschema` son la suite de admin/v1
+        (TestClient y la validacion contra los schemas del contrato), y el resto es el pipeline."""
         assert paquete in self._requeridas(), f"{paquete} no esta en requirements.txt"
 
     def test_no_se_declara_lo_que_el_engine_no_tiene(self):
         """`markitdown` es la conversion de DOCX/HTML/EPUB del privado, que NO esta replicada
         aca (ver README, "Not in this mirror yet"). Declararla haria creer que si."""
         assert "markitdown" not in self._requeridas()
+
+
+class TestDependenciasDeLaAPI:
+    """`api/requirements.txt` es OTRO archivo y OTRA doctrina: construye una imagen, asi que va
+    pineado con `==`. Un `>=` ahi significa que el mismo commit produce una imagen distinta cada
+    vez que alguien publica en PyPI, y entonces un rollback no significa nada."""
+
+    @staticmethod
+    def _declaradas() -> dict:
+        texto = (RAIZ / "api" / "requirements.txt").read_text(encoding="utf-8")
+        salida = {}
+        for linea in texto.splitlines():
+            linea = linea.split("#")[0].strip()
+            if linea:
+                nombre = re.split(r"[<>=!\[ ]", linea)[0].lower()
+                salida[nombre] = linea
+        return salida
+
+    @pytest.mark.parametrize("paquete", ["fastapi", "uvicorn", "neo4j", "google-genai",
+                                         "python-dotenv", "pymupdf", "slowapi", "pyyaml"])
+    def test_declara_lo_que_la_api_importa(self, paquete):
+        """`pymupdf` porque la API importa `pipeline/parseo.py`, y `pyyaml` porque el descriptor
+        de admin/v1 se arma desde el perfil de dominio."""
+        assert paquete in self._declaradas(), f"{paquete} no esta en api/requirements.txt"
+
+    def test_todas_las_dependencias_de_la_imagen_estan_pineadas(self):
+        sueltas = [linea for linea in self._declaradas().values() if "==" not in linea]
+        assert not sueltas, f"sin pin exacto: {sueltas}"
 
 
 class TestNadaDeSecretos:

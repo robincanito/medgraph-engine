@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nomos.unicrono.com/contracts/job/v1",
+  "title": "IngestJob",
+  "description": "Estado de una ingesta de principio a fin. Fuente de verdad ÚNICA del progreso — la escriben todos los servicios del pipeline y la lee la consola (U4: monitor). Implementación actual: Firestore jobs/{job_id}; el store es intercambiable (Delta/Postgres), el schema no.",
+  "type": "object",
+  "required": [
+    "job_id",
+    "state",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "description": "UUID de la ingesta"
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "uploaded",
+        "classified",
+        "parsed",
+        "chunked",
+        "vectorized",
+        "extracted",
+        "pending_review",
+        "loaded",
+        "failed"
+      ],
+      "description": "Estado actual de la state machine. pending_review = gate humano (Censor), saltable por config de tier"
+    },
+    "created_at": {
+      "type": "string",
+      "description": "ISO 8601"
+    },
+    "updated_at": {
+      "type": "string",
+      "description": "ISO 8601"
+    },
+    "tenant_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Organización dueña (multi-tenant; null = uso interno)"
+    },
+    "source": {
+      "type": "object",
+      "description": "La fuente que se está ingiriendo",
+      "properties": {
+        "filename": {
+          "type": "string"
+        },
+        "gcs_uri": {
+          "type": "string",
+          "description": "gs://... del archivo original"
+        },
+        "content_type": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        },
+        "source_id": {
+          "type": "string",
+          "description": "Slug asignado (hoy libro_id)"
+        }
+      }
+    },
+    "classification": {
+      "type": "object",
+      "description": "Resultado del Dispatch/Diakrisis (classifier)",
+      "properties": {
+        "tipo": {
+          "type": "string",
+          "description": "libro | guia | formulario | material_academico | ..."
+        },
+        "domain": {
+          "type": "string",
+          "description": "Perfil de dominio destino (medicina, derecho, ...)"
+        },
+        "confianza": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "kind": {
+          "type": "string",
+          "description": "Clase de fuente de la instancia (uno de los `source_kinds[].id` del descriptor) a la que el backend tradujo `tipo`. SON DOS VOCABULARIOS DISTINTOS: `tipo` es el del clasificador (libro, paper, legislacion...) y `kind` el de la instancia (bibliografia/catedra, norma/doctrina). La consola cruza `kind` con `source_kinds` para dibujar el recorrido de pipeline; cruzar `tipo` no matchea nunca. Agregado 10-sep-2026."
+        },
+        "fields": {
+          "type": "object",
+          "description": "Lo que el clasificador PROPUSO para los campos de metadata, con las claves de `descriptor.source_fields[].name`. La consola pre-carga el formulario de revision con esto en vez de mostrarlo vacio: sin este campo, la persona vuelve a tipear lo que la maquina ya leyo. Los vacios no viajan -- un campo propuesto en blanco no es una propuesta. Lo que una instancia puede proponer es lo mismo que sabe guardar por `overrides`. Agregado 10-sep-2026.",
+          "additionalProperties": true
+        },
+        "source_id_suggested": {
+          "type": "string",
+          "description": "Identificador de fuente sugerido por el clasificador, para pre-cargar el campo en vez de dejarlo vacio. La persona puede cambiarlo; el que manda es el que llega en `POST /jobs`."
+        }
+      }
+    },
+    "steps": {
+      "type": "object",
+      "description": "Timestamps + métricas por paso completado. Clave = nombre del estado alcanzado",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "completed_at": {
+            "type": "string"
+          },
+          "duration_s": {
+            "type": "number"
+          },
+          "metrics": {
+            "type": "object",
+            "description": "Libre por paso: chunks_count, entities_count, tokens, etc."
+          },
+          "artifact_uri": {
+            "type": "string",
+            "description": "gs://... del artefacto producido por este paso"
+          }
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "description": "Estado del gate humano (solo si pasó por pending_review)",
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "reviewed_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewed_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "decision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "approved",
+            "rejected",
+            "edited",
+            null
+          ]
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "description": "Avisos de un job que TERMINÓ pero no salió perfecto. Opcional y retrocompatible: un job sin avisos puede omitir el campo o mandar []. Existe porque `state` no alcanza — el 13-sep-2026 el banco de QA de MedGraph encontró que un libro al que le faltaban 9 de 19 vectores terminaba en `loaded` (el terminal de ÉXITO) y que el único rastro era la métrica `sin_vector` de un paso: la consola tenía que mirar una métrica para saber que el libro no se puede buscar completo. La alternativa era un estado nuevo (`degraded`, `partial`), que le cambia la state machine a TODAS las instancias por un caso que se puede decir con un aviso; así el stepper sigue diciendo la verdad (el pipeline llegó al final) y la pantalla puede mostrar que el resultado está incompleto. NO es el lugar de los errores: un job que falló lleva `error` y `state: failed`.",
+      "items": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "sin_vector"
+            ],
+            "description": "Identificador estable del aviso: es por acá que enruta la consola, nunca por el texto. El enum crece con el contrato a propósito — una instancia no inventa códigos, porque un código que el front no conoce es un aviso que no se puede mostrar como lo que es. `sin_vector`: quedaron unidades sin embedding (el proveedor falló más de lo que aguantan los reintentos por lote y la segunda pasada). La fuente lo publica además como `stats.units_embedded < stats.units` (status `parcial`) y se arregla con POST /admin/v1/sources/{id}/vectorize."
+          },
+          "message": {
+            "type": "string",
+            "description": "Para humanos, en el idioma de la instancia, igual que Error.detail."
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Cuántas unidades afecta el aviso, cuando el aviso se cuenta."
+          }
+        }
+      }
+    },
+    "error": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Presente si state=failed",
+      "properties": {
+        "step": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "at": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

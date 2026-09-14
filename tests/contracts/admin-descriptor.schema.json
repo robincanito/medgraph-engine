@@ -1,0 +1,327 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nomos.unicrono.com/contracts/admin-descriptor/v1",
+  "title": "AdminDescriptor",
+  "description": "Lo que un grafo Nomos (MedGraph, LexGraph, cualquier instancia del engine) publica en GET /admin/v1/descriptor para que la consola (nomos-console) lo administre SIN saber que es un libro ni una ley. La consola renderiza tablas, formularios, filtros y el stepper del pipeline desde este documento: el vocabulario, los campos editables, los pasos y las capacidades vienen del backend, que lo arma desde su perfil de dominio (profiles/*.yaml) mas su configuracion de instancia. Agregar un dominio = publicar otro descriptor, no tocar el front. Ver openapi/admin-v1.yaml. Diseño 7-sep-2026.",
+  "type": "object",
+  "required": ["contract_version", "domain", "profile", "instance", "labels", "source_kinds", "source_fields", "pipeline_steps", "capabilities", "auth"],
+  "properties": {
+    "contract_version": {
+      "const": "admin/v1",
+      "description": "Version del contrato de administracion que implementa el backend. La consola rechaza lo que no conoce."
+    },
+    "domain": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "description": "Dominio de conocimiento: medicina | derecho | ... Coincide con `profile:` del YAML de perfil."
+    },
+    "profile": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*@[0-9]+$",
+      "description": "Perfil de dominio y version con que se extrae, tal como viaja en el linaje (lineage.profile): medicina@2, derecho@1."
+    },
+    "instance": {
+      "type": "object",
+      "description": "La instancia concreta que responde.",
+      "required": ["name", "display_name", "api_base", "graph_target", "environment"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$", "description": "Identificador corto: medgraph | lexgraph | ..." },
+        "display_name": { "type": "string", "description": "Nombre para el selector de dominio de la consola: MedGraph, LexGraph" },
+        "api_base": { "type": "string", "format": "uri", "description": "Base publica de la API que sirve este descriptor (sin /admin/v1)." },
+        "graph_target": { "type": "string", "description": "Igual a graph.target del perfil (medgraph, lexgraph). Se resuelve a secrets, nunca a una URI: eso es infraestructura." },
+        "environment": { "type": "string", "enum": ["development", "staging", "production"] },
+        "version": { "type": ["string", "null"], "description": "Version o revision desplegada del backend (ej: medgraph-api-00112-abc)." }
+      }
+    },
+    "labels": {
+      "type": "object",
+      "description": "Vocabulario de la interfaz. La consola usa estas palabras en titulos, botones y columnas; por eso el front es agnostico. MedGraph: libro/libros/chunk/chunks. LexGraph: norma/normas/articulo/articulos.",
+      "required": ["source_singular", "source_plural", "unit_singular", "unit_plural"],
+      "properties": {
+        "source_singular": { "type": "string" },
+        "source_plural": { "type": "string" },
+        "unit_singular": { "type": "string", "description": "La unidad indexable en que se cuenta una fuente: chunk | articulo" },
+        "unit_plural": { "type": "string" }
+      },
+      "additionalProperties": { "type": "string" }
+    },
+    "source_kinds": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Clases de fuente que este grafo administra. AdminSource.kind es uno de estos ids. Cada clase puede tener su propio recorrido de pipeline.",
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "unit_label"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+          "label": { "type": "string" },
+          "unit_label": { "type": "string", "description": "Nombre de la unidad para esta clase (una norma se mide en articulos; la doctrina en chunks)." },
+          "description": { "type": "string" },
+          "pipeline_steps": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Recorrido de esta clase si difiere del default: ids de pipeline_steps, en orden. Una norma estructurada no se chunkea ni se vectoriza: uploaded, classified, parsed, loaded."
+          }
+        }
+      }
+    },
+    "source_fields": {
+      "type": "array",
+      "description": "Campos de metadata de una fuente, en el orden en que la consola los muestra: columnas de la tabla, formulario de edicion y filtros. Las claves de AdminSource.fields son estos `name`.",
+      "items": {
+        "type": "object",
+        "required": ["name", "label", "type", "editable"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "Clave dentro de AdminSource.fields" },
+          "label": { "type": "string" },
+          "type": { "type": "string", "enum": ["string", "text", "integer", "number", "boolean", "date", "enum", "tags"] },
+          "editable": { "type": "boolean", "description": "Si false, PATCH /sources/{id} lo rechaza con 422 not_editable." },
+          "required": { "type": "boolean", "default": false },
+          "filterable": { "type": "boolean", "default": false, "description": "Si true, GET /sources acepta filter[name]=valor." },
+          "enum_values": { "type": "array", "items": { "type": "string" }, "description": "Obligatorio si type=enum." },
+          "applies_to": { "type": "array", "items": { "type": "string" }, "description": "ids de source_kinds a los que aplica; ausente = a todos." },
+          "description": { "type": "string" }
+        },
+        "if": { "properties": { "type": { "const": "enum" } } },
+        "then": { "required": ["enum_values"] }
+      }
+    },
+    "pipeline_steps": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Recorrido default del pipeline, en orden, con las etiquetas del stepper. Los ids son ESTADOS de job/v1: el monitor marca completado cada paso presente en IngestJob.steps, sin traduccion.",
+      "items": {
+        "type": "object",
+        "required": ["id", "label"],
+        "properties": {
+          "id": { "type": "string", "enum": ["uploaded", "classified", "parsed", "chunked", "vectorized", "extracted", "pending_review", "loaded"] },
+          "label": { "type": "string" },
+          "description": { "type": "string" },
+          "optional": { "type": "boolean", "default": false, "description": "El paso puede no ocurrir (pending_review saltado por tier, extracted en normas puras)." }
+        }
+      }
+    },
+    "entity_types": {
+      "type": "array",
+      "description": "Tipos de entidad del perfil (profiles/<dominio>.yaml -> entities), para filtros del explorador y stats. Una instancia sin extraccion puede omitirlo.",
+      "items": {
+        "type": "object",
+        "required": ["id", "label"],
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "type": "string", "description": "Label del nodo en el grafo (Patologia, Law)" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "relation_types": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Ids de relacion del perfil (relations[].id)."
+    },
+    "unit_types": {
+      "type": "array",
+      "description": "Vocabulario de tipos de la unidad indexable: como clasifica esta instancia el CONTENIDO de un chunk. AdminUnit.type es uno de estos ids, o null si en ese dominio la unidad no se clasifica asi (un articulo de norma). Obligatorio si capabilities.units es true: sin esto el filtro `?type=` de la lista de unidades seria texto libre contra un enum que solo el backend conoce. Lo que lo justifica de verdad es `retrieval_excluded` -- el 13-sep-2026 MedGraph empezo a marcar `referencias` e `indice` como NO-CONTENIDO y a excluirlos del retrieval; quien administra necesita ver eso EN la unidad, y no puede deducirlo del nombre del tipo.",
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "retrieval_excluded"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "description": "Clave del tipo tal como viaja en AdminUnit.type y en el grafo (MedGraph: el enum de tipo_contenido de chunk/v1)." },
+          "label": { "type": "string" },
+          "description": { "type": "string" },
+          "retrieval_excluded": {
+            "type": "boolean",
+            "description": "True si el retrieval de esta instancia DESCARTA las unidades de este tipo. No es decoracion: una unidad excluida existe, esta vectorizada, y aun asi nunca va a aparecer en una busqueda -- sin este campo eso se lee como un bug del retrieval. Es una decision de dominio (una lista de citas bibliograficas no dice nada), no del contrato."
+          }
+        }
+      }
+    },
+    "accepted_formats": {
+      "type": "object",
+      "description": "Formatos que POST /uploads acepta: content_type -> extensiones. Obligatorio si capabilities.upload es true: sin esto la consola no tiene como saberlo y tiene que adivinar (hasta el 12-sep-2026 tenia 'application/pdf' escrito a mano, o sea conocimiento de dominio en el front). La consola lo pasa tal cual al selector de archivos, dice los limites ANTES de la transferencia, y no acepta nada que no este aca. La clave es el Content-Type con el que la instancia firma la URL del storage y que el cliente DEBE mandar en el PUT (UploadTicket.headers); las extensiones son la validacion real, porque el navegador miente (Windows declara .csv como application/vnd.ms-excel). Que una instancia acepte un formato NO significa que lo trate igual: la procedencia puede cambiar de unidad (un PDF cita pagina; un HTML, capitulo).",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$" },
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "items": { "type": "string", "pattern": "^\\.[a-z0-9]+$" },
+        "description": "Extensiones en minuscula y con punto."
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "Que operaciones ofrece esta instancia. La consola oculta lo que es false; el backend ademas responde 403 capability_disabled si se lo llama.",
+      "required": ["upload", "classify", "review", "edit", "delete", "reingest", "explore", "wake"],
+      "properties": {
+        "upload": { "type": "boolean", "description": "POST /uploads (signed URL) y arranque de jobs." },
+        "classify": { "type": "boolean", "description": "Clasificacion automatica del documento subido (Dispatch/Diakrisis, LLM)." },
+        "review": { "type": "boolean", "description": "Gate humano pending_review (Censor)." },
+        "edit": { "type": "boolean", "description": "PATCH de campos editables de una fuente." },
+        "delete": { "type": "boolean", "description": "DELETE de una fuente completa. LexGraph lo publica false: borrar una norma rompe citas." },
+        "reingest": { "type": "boolean" },
+        "explore": { "type": "boolean", "description": "La instancia expone /graph/search y /graph/node/{id}/neighbors (U0.3)." },
+        "wake": { "type": "boolean", "description": "El grafo vive apagado y una consulta lo despierta: /health puede responder sleeping y las rutas 503 WarmingUp + Retry-After." },
+        "facets": { "type": "boolean", "description": "La instancia calcula GET /sources/facets: que valores existen en cada campo filtrable, con su conteo. Sin esto, un campo filtrable que no es enum solo se puede filtrar escribiendo el valor exacto. Opcional por retrocompatibilidad: ausente = false." },
+        "units": { "type": "boolean", "description": "La instancia expone GET /sources/{id}/units y /sources/{id}/units/{unit_id}: ABRIR una unidad indexable (chunk, articulo) en modo diagnostico, solo lectura. Cierra el circuito de una evaluacion: el numero dice que la consulta trajo el pasaje equivocado, y esta es la pantalla donde se mira POR QUE. Si esta en true, `unit_types` es obligatorio. Opcional por retrocompatibilidad, igual que `facets`: ausente = false." },
+        "vectorize": { "type": "boolean", "description": "La instancia expone POST /sources/{id}/vectorize: embeber las unidades que quedaron SIN vector, sin re-ingestar la fuente. Es el boton que necesita el aviso `sin_vector` de job/v1 (13-sep-2026): un job puede terminar en `loaded` con parte del material sin embedding porque el proveedor de embeddings estuvo caido mas de lo que aguantan los reintentos, y mostrar eso sin ofrecer como arreglarlo no es una pantalla de administracion. Re-ingestar seria volver a parsear, volver a cargar y volver a pagar los vectores que ya estaban. Una instancia cuyo corpus no se vectoriza (LexGraph: la norma se cita por lookup exacto) simplemente no publica la clave. Opcional por retrocompatibilidad, igual que `facets` y `units`: ausente = false." }
+      }
+    },
+    "capability_notes": {
+      "type": "object",
+      "description": "Por que una capacidad esta en false y como se desbloquea. Bloque HERMANO de `capabilities`, no un reemplazo: `capabilities` sigue siendo {nombre: boolean} porque la consola lo lee con `!!` (src/features/fuentes/components/panel-fuente.tsx:170) y un objeto ahi adentro evalua truthy, o sea que una instancia que publico delete:false mostraria el boton de borrar. Obligatorio para CADA capacidad declarada false (allOf, abajo). Una capacidad en true no lleva nota: si funciona, no hay nada que explicar. El texto viaja en el idioma de la instancia, como Error.detail; el que enruta es `kind`, nunca el texto.",
+      "propertyNames": { "enum": ["upload", "classify", "review", "edit", "delete", "reingest", "explore", "wake", "facets", "units", "vectorize"] },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["kind", "reason", "how_to_unblock"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "type": "string", "enum": ["domain_decision", "not_built", "not_configured"],
+            "description": "La NATURALEZA del bloqueo, para que la consola decida sin leer castellano. domain_decision: no se desbloquea nunca, esta apagada porque prenderla haria dano en este dominio (LexGraph delete: borrar una norma rompe toda cita que la referencie); how_to_unblock es null y la consola no ofrece esperanza. not_built: el codigo no existe todavia; how_to_unblock dice QUE hay que construir. not_configured: el codigo existe y a esta instancia le falta configuracion, credencial o infraestructura; how_to_unblock dice que hay que configurar." },
+          "reason": { "type": "string", "minLength": 12,
+            "description": "POR QUE, en una o dos frases, para la persona que administra. Es conocimiento de la instancia: vive al lado de CAPABILITIES en el backend, nunca en el front." },
+          "how_to_unblock": { "type": ["string", "null"], "minLength": 12,
+            "description": "COMO. `null` SOLO si kind=domain_decision: no es que falte escribirlo, es que no hay camino. Siempre PRESENTE aunque sea null: un campo que aparece y desaparece obliga al front a defenderse de su ausencia." },
+          "docs_url": { "type": "string", "format": "uri",
+            "description": "Opcional. Donde se lee la decision completa. No es un boton que desbloquee nada: en admin/v1 el desbloqueo lo hace quien opera el backend, no un click." }
+        },
+        "allOf": [
+          { "description": "Una decision de dominio no tiene camino de desbloqueo: decir uno seria prometer algo que no va a pasar.",
+            "if": { "required": ["kind"], "properties": { "kind": { "const": "domain_decision" } } },
+            "then": { "properties": { "how_to_unblock": { "type": "null" } } } },
+          { "description": "Lo que falta construir o configurar SI tiene camino: un null aca es la nota vacia que este campo vino a matar.",
+            "if": { "required": ["kind"], "properties": { "kind": { "enum": ["not_built", "not_configured"] } } },
+            "then": { "properties": { "how_to_unblock": { "type": "string", "minLength": 12 } } } }
+        ]
+      }
+    },
+    "auth": {
+      "type": "object",
+      "description": "Como se autentica y autoriza la administracion. La consola manda el JWT de sesion de Clerk; el backend verifica firma e issuer y exige el rol.",
+      "required": ["schemes", "admin_role"],
+      "properties": {
+        "schemes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "enum": ["clerk_jwt", "api_key"] },
+          "description": "Credenciales que el backend acepta en /admin/v1."
+        },
+        "admin_role": {
+          "type": "string",
+          "description": "Rol de Clerk (claim de organizacion, ej: org:admin) exigido en toda operacion de escritura. Quien lo tiene es decision de la organizacion, no del contrato. Sin el, 403 forbidden_role."
+        },
+        "issuers": {
+          "type": "array",
+          "items": { "type": "string", "format": "uri" },
+          "description": "Issuers de Clerk aceptados por esta instancia (uno por entorno). Informativo para la consola: el backend los valida igual."
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "description": "Si la instancia acepta subidas, tiene que decir de que formatos. LexGraph publica upload:false y no lo lleva.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["upload"], "properties": { "upload": { "const": true } } } }
+      },
+      "then": { "required": ["accepted_formats"] }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. Sin esto, la consola esconde el boton y quien administra no sabe si es por rol, por configuracion o porque no existe.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["upload"], "properties": { "upload": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["upload"] } } }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. Sin esto, la consola esconde el boton y quien administra no sabe si es por rol, por configuracion o porque no existe.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["classify"], "properties": { "classify": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["classify"] } } }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. Sin esto, la consola esconde el boton y quien administra no sabe si es por rol, por configuracion o porque no existe.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["review"], "properties": { "review": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["review"] } } }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. Sin esto, la consola esconde el boton y quien administra no sabe si es por rol, por configuracion o porque no existe.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["edit"], "properties": { "edit": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["edit"] } } }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. Sin esto, la consola esconde el boton y quien administra no sabe si es por rol, por configuracion o porque no existe.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["delete"], "properties": { "delete": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["delete"] } } }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. Sin esto, la consola esconde el boton y quien administra no sabe si es por rol, por configuracion o porque no existe.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["reingest"], "properties": { "reingest": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["reingest"] } } }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. Sin esto, la consola esconde el boton y quien administra no sabe si es por rol, por configuracion o porque no existe.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["explore"], "properties": { "explore": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["explore"] } } }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. Sin esto, la consola esconde el boton y quien administra no sabe si es por rol, por configuracion o porque no existe.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["wake"], "properties": { "wake": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["wake"] } } }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. Sin esto, la consola esconde el boton y quien administra no sabe si es por rol, por configuracion o porque no existe.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["facets"], "properties": { "facets": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["facets"] } } }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. Igual que `facets`, `units` es opcional: el `if` pide la CLAVE, asi que un descriptor viejo que la omite (ausente = false) no queda obligado a explicar una capacidad que no sabia que existia. Publicarla en false EXPLICITO si obliga: ahi alguien decidio algo y hay algo que contar.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["units"], "properties": { "units": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["units"] } } }
+    },
+    {
+      "description": "Si la instancia abre unidades, tiene que decir que tipos de unidad existen y cuales excluye el retrieval. Mismo patron que accepted_formats con upload: la consola no puede armar el filtro de tipos adivinando el enum del dominio.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["units"], "properties": { "units": { "const": true } } } }
+      },
+      "then": { "required": ["unit_types"] }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. `vectorize` es opcional con el mismo patron que `facets` y `units`: el `if` pide la CLAVE, asi que una instancia que no la publica (ausente = false, por ejemplo porque su corpus no se vectoriza) no queda obligada a explicar nada. Publicarla en false EXPLICITO si obliga: ahi alguien decidio algo y hay algo que contar.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["vectorize"], "properties": { "vectorize": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["vectorize"] } } }
+    }
+  ],
+  "additionalProperties": false
+}

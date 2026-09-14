@@ -1,8 +1,26 @@
-fastapi>=0.115
-uvicorn>=0.34
-neo4j>=5.0
-google-genai>=1.0
-python-dotenv>=1.0
-pymupdf>=1.24
-python-multipart>=0.0.9
-slowapi>=0.1.9
+# Dependencies of the API image. PINNED with == on purpose.
+#
+# Why exact pins and not floors like the root requirements.txt: this file builds a container, and
+# a build that resolves "whatever is latest on PyPI" means the same commit produces a different
+# image every time — which is how a rollback stops meaning anything. The pipeline's own
+# requirements.txt keeps floors because it runs on your machine, not in an image.
+# Versions = what the suite was run against (14-sep-2026). To upgrade: raise a pin on purpose,
+# run the suite, deploy.
+fastapi==0.120.4
+uvicorn==0.38.0
+neo4j==6.2.0
+# Embeddings for the semantic half of the search (services/vector.py) and the LLM router of
+# POST /query (services/analyzer.py).
+google-genai==2.4.0
+python-dotenv==1.2.2
+# The API imports pipeline/parseo.py (the retrieval filters by the content types it declares),
+# and that module reads PDFs with PyMuPDF.
+pymupdf==1.27.2.3
+slowapi==0.1.10
+# The admin/v1 descriptor is built from the active domain profile (profiles/*.yaml via
+# pipeline/perfiles.py), which is YAML.
+pyyaml==6.0.3
+#
+# NOT here, and on purpose: python-multipart. It was needed by POST /admin/ingest (file upload),
+# which this mirror no longer exposes — ingestion runs through pipeline/ from your own script.
+# Add it back the day this API accepts an upload again.

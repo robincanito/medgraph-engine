@@ -190,51 +190,6 @@ def execute_bibliography(analysis: dict, top_k: int = 20) -> dict:
     }
 
 
-def execute_activities(analysis: dict) -> dict:
-    """Busca actividades académicas (TPs, seminarios, talleres).
-
-    Siempre busca usando TODAS las entidades detectadas (no solo las
-    clasificadas como actividad_academica), porque el analyzer raramente
-    clasifica entidades como actividades.
-    """
-    result = {"actividades": [], "material": []}
-    existing_ids = set()
-
-    def _add_activities(acts):
-        for act in (acts or [])[:5]:
-            aid = act.get("id")
-            if aid and aid not in existing_ids:
-                existing_ids.add(aid)
-                result["actividades"].append(act)
-                try:
-                    mat = graph.get_activity_material(aid)
-                    if mat:
-                        result["material"].extend(mat)
-                except Exception:
-                    pass
-
-    # 1. Buscar por cada entidad detectada (todas, no solo actividades)
-    for ent in analysis.get("entidades_detectadas", []):
-        texto = ent.get("texto", "")
-        if texto and len(texto) >= 3:
-            _add_activities(graph.get_activity(texto))
-
-    # 2. Buscar por sub_queries
-    for sq in analysis.get("sub_queries", []):
-        _add_activities(graph.get_activity(sq))
-
-    # 3. Buscar por palabras individuales del query original (fallback)
-    if not result["actividades"]:
-        pregunta = analysis.get("original", "")
-        words = [w for w in pregunta.lower().split() if len(w) >= 4]
-        for word in words[:6]:
-            _add_activities(graph.get_activity(word))
-            if result["actividades"]:
-                break
-
-    return result
-
-
 def execute_dags(analysis: dict) -> dict:
     """Busca flujos clínicos (PATHWAY + CLINICAL) para entidades detectadas."""
     result = {"pathways": [], "clinical": []}

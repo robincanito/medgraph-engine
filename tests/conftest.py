@@ -18,6 +18,11 @@ from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RAIZ))
+# Y la raiz de la API, que NO es un paquete: `main`, `services` y `routers` se importan como
+# modulos de primer nivel (es como los resuelve `uvicorn main:app` desde api/ y como los copia el
+# Dockerfile). Va DESPUES de la raiz del repo para que `from pipeline import ...` siga saliendo de
+# la raiz, que es donde vive el espejo del pipeline.
+sys.path.insert(1, str(RAIZ / "api"))
 
 os.environ.setdefault("NEO4J_URI", "bolt://127.0.0.1:1")
 os.environ.setdefault("NEO4J_USERNAME", "neo4j")

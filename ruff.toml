@@ -1,11 +1,18 @@
 # Lint del engine. Alcance ACOTADO a proposito: `pipeline/` (la copia canonica de cada paso del
-# pipeline, espejo byte a byte del repo privado), `tests/` (la suite) y los dos scripts de la raiz
-# que ya delegan en el paquete (`parser_v2.py` es un shim, `migrate_chunks.py` re-exporta la
-# normalizacion). Los demas scripts de la raiz (`vectorize.py`, `upload_chunks.py`,
-# `extract_entities.py`, `ontology.py`, `search.py`, `parser.py`, `quickstart.py`, `load_dags.py`,
-# `dedup_entities.py`, `schema.py`, `db.py`, `mcp_server.py`) y la carpeta `api/` son de la v1.0 y
-# hoy juntan ~60 hallazgos entre imports desordenados, f-strings sin placeholders y `open(..., "r")`:
-# meterlos en el gate lo volveria una lista que nadie lee. Entran cuando se los consolide.
+# pipeline, espejo byte a byte del repo privado), `tests/` (la suite), `api/` (el servicio) y los
+# dos scripts de la raiz que ya delegan en el paquete (`parser_v2.py` es un shim,
+# `migrate_chunks.py` re-exporta la normalizacion).
+#
+# `api/` ENTRO EL 14-sep-2026, con la tanda que hizo que la API arranque. Tenia 17 hallazgos y
+# dos eran bugs de verdad, no estilo: una clave repetida en un dict de normalizacion (ganaba la
+# segunda y la primera no se aplicaba nunca) y un `response` que no existe en el log del fallo del
+# router —el diagnostico decia siempre "no response"—. Es el argumento entero a favor de meter una
+# carpeta en el gate: los hallazgos de estilo son ruido hasta que uno de ellos es un bug.
+#
+# Los demas scripts de la raiz (`vectorize.py`, `upload_chunks.py`, `extract_entities.py`,
+# `ontology.py`, `search.py`, `parser.py`, `quickstart.py`, `load_dags.py`, `dedup_entities.py`,
+# `schema.py`, `db.py`, `mcp_server.py`) siguen afuera: son de la v1.0 y juntan decenas de
+# hallazgos que volverian el gate una lista que nadie lee. Entran cuando se los consolide.
 #
 # Regla de la casa: el gate FALLA CERRADO. Si ruff marca algo en el alcance, CI no pasa. Por eso
 # solo se seleccionan reglas que el alcance cumple hoy o que senalan bugs reales; el estilo puro
@@ -36,9 +43,12 @@ ignore = [
 # conftest.py prepara sys.path y el entorno ANTES de cualquier import de la suite: el orden es
 # el punto, no un descuido.
 "tests/conftest.py" = ["E402"]
+# main.py de la API suma la raiz del repo a sys.path ANTES de importar los routers (sin eso
+# `from pipeline import ...` no resuelve corriendo local desde api/): el orden es el punto.
+"api/main.py" = ["E402"]
 # test_basic.py es de la v1.0: importa los scripts de la raiz DENTRO de cada test a proposito
 # (para que un script sin su dependencia instalada no voltee el archivo entero).
 "tests/test_basic.py" = ["E402"]
 
 [lint.isort]
-known-first-party = ["pipeline"]
+known-first-party = ["pipeline", "services", "routers", "main"]

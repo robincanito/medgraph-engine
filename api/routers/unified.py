@@ -4,15 +4,16 @@ y devuelve un paquete completo de conocimiento.
 """
 
 import asyncio
+
 from fastapi import APIRouter
 from pydantic import BaseModel
+
 from services.analyzer import analyze_query
 from services.layers import (
-    execute_ontology,
-    execute_graph,
     execute_bibliography,
-    execute_activities,
     execute_dags,
+    execute_graph,
+    execute_ontology,
 )
 
 router = APIRouter(tags=["unified"])
@@ -21,7 +22,6 @@ LAYER_MAP = {
     "ONTOLOGY": ("ontologia", execute_ontology),
     "GRAPH": ("grafo", execute_graph),
     "BIBLIOGRAPHY": ("bibliografia", None),  # special handling for top_k
-    "ACTIVITIES": ("actividades", execute_activities),
     "DAGS": ("dags", execute_dags),
 }
 
@@ -34,7 +34,7 @@ class QueryRequest(BaseModel):
 @router.post("/query")
 async def unified_query(req: QueryRequest):
     """Consulta inteligente unificada. Analiza la pregunta, detecta entidades,
-    activa las capas necesarias (ontología, grafo, bibliografía, actividades, DAGs),
+    activa las capas necesarias (ontología, grafo, bibliografía, DAGs),
     y devuelve un paquete completo."""
 
     # 1. Analyzer (Gemini orquestador)
@@ -70,7 +70,7 @@ async def unified_query(req: QueryRequest):
         },
     }
 
-    for key, result in zip(tasks.keys(), results):
+    for key, result in zip(tasks.keys(), results, strict=True):
         if isinstance(result, Exception):
             response[key] = {"error": str(result)}
         else:
@@ -98,9 +98,6 @@ async def unified_query(req: QueryRequest):
     )
     response["tiene_bibliografia"] = bool(
         bib.get("results") if isinstance(bib, dict) else False
-    )
-    response["tiene_actividades"] = bool(
-        response.get("actividades", {}).get("actividades")
     )
     response["tiene_dags"] = bool(
         response.get("dags", {}).get("pathways")

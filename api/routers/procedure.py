@@ -1,6 +1,7 @@
 """Endpoints de procedimientos."""
 
 from fastapi import APIRouter
+
 from services import graph
 
 router = APIRouter(prefix="/procedure", tags=["procedure"])

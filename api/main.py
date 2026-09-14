@@ -1,25 +1,52 @@
-"""MedGraph API — Knowledge base medica para estudio."""
+"""MedGraph Engine API — consulta del grafo y administracion (admin/v1) de solo lectura.
 
-import os
+QUE ES ESTE SERVICIO. La cara HTTP del pipeline: lo que ya esta cargado en el grafo se busca
+(`/search/*`, `/query`, `/topic/*`, `/pathology/*`, `/procedure/*`) y se administra
+(`/admin/v1/*`, contrato de nomos-contracts, solo lectura). La INGESTA no vive aca: se corre
+llamando a `pipeline/` desde tu propio script, que es lo que documenta el README.
+
+LO QUE SE PODO EL 14-sep-2026, cuando esta API paso de "no arranca" a arrancar: las rutas de la
+instancia privada que dependen de nodos que ningun script de este repo escribe —`:UP` y `:Tema`
+(temas por unidad problematica), `:Actividad` y `:Documento` (actividades de catedra y su
+material)— y `POST /admin/ingest`, que traia su PROPIO parser y una carga destructiva, o sea la
+contracara exacta de `pipeline/carga.py`. Una API chica que arranca vale mas que una grande que
+promete rutas vacias; el README lo lista endpoint por endpoint.
+"""
+
+import logging
 import secrets
+import sys
 import time
-from fastapi import FastAPI, Request, HTTPException
+from pathlib import Path
+
+# El pipeline (`pipeline/parseo.py`, `pipeline/perfiles.py`) vive FUERA de api/, y esta API lo
+# importa: el retrieval filtra por los tipos de contenido que declara el parseo y el descriptor de
+# admin/v1 lee el perfil activo. En la imagen, el Dockerfile de la raiz lo copia al lado de este
+# archivo; corriendo local desde api/ hay que sumar la raiz del repo al path.
+_RAIZ = Path(__file__).resolve().parent.parent
+if not (Path(__file__).resolve().parent / "pipeline").exists() and str(_RAIZ) not in sys.path:
+    sys.path.insert(0, str(_RAIZ))
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from dotenv import load_dotenv
-from routers import topics, search, pathology, procedure, activity, admin, comprehensive, ontology_router, unified
+from slowapi.util import get_remote_address
+
+from pipeline import perfiles
+from routers import admin_v1, comprehensive, ontology_router, pathology, procedure, search, unified
 from services import graph
+from services.autorizacion import AdminError
+from services.settings import get_settings
 
-load_dotenv()
+settings = get_settings()
 
-# FALLA CERRADA, Y ES LO QUE ARREGLA EL ITEM M-4 (13-sep-2026). `os.getenv("API_KEY", "")` dejaba
-# la API ABIERTA cuando la variable faltaba: sin header, `api_key` valia "" y el `!=` de abajo
-# comparaba "" contra "" y daba acceso a todo. Un olvido en el despliegue no puede ser "sin auth":
-# o hay clave o no hay servicio. Se aborta al IMPORTAR -no en el primer request- para que el fallo
-# sea del arranque, que es donde se mira.
-API_KEY = os.getenv("API_KEY", "")
+# FALLA CERRADA. `os.getenv("API_KEY", "")` dejaba la API ABIERTA cuando la variable faltaba: sin
+# header, `api_key` valia "" y el `!=` de abajo comparaba "" contra "" y daba acceso a todo. Un
+# olvido en el despliegue no puede ser "sin auth": o hay clave o no hay servicio. Se aborta al
+# IMPORTAR -no en el primer request- para que el fallo sea del arranque, que es donde se mira.
+API_KEY = settings.api_key
 if not API_KEY:
     raise RuntimeError(
         "API_KEY no esta definida. La API no arranca sin clave: con la variable vacia "
@@ -27,32 +54,33 @@ if not API_KEY:
         "poné un valor (o exportá API_KEY en el entorno del contenedor)."
     )
 
+# EL PERFIL ACTIVO SE LEE AL ARRANCAR, no en el primer request. Con `PROFILE` apuntando a un YAML
+# que no existe, la primera pantalla de la consola -que pide GET /admin/v1/descriptor- seria un 500
+# sin explicacion. `perfiles.cargar` falla cerrado y con un mensaje que dice que archivo falta.
+perfiles.cargar(settings.profile)
+
 # Rate limiter
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 
 app = FastAPI(
-    title="MedGraph API",
-    description="Knowledge base medica con grafo de conocimiento y busqueda semantica",
-    version="2.0.0",
-    servers=[{"url": os.getenv("API_BASE_URL", "http://localhost:8000")}],
-    docs_url="/docs" if os.getenv("ENVIRONMENT") == "development" else None,
+    title="MedGraph Engine API",
+    description="Consulta del grafo y administracion admin/v1 sobre lo que ingesto el pipeline",
+    version="2.1.0",
+    servers=[{"url": settings.public_base_url}],
+    # /docs solo con ENVIRONMENT=development EXACTO (y detras de la API key igual, porque el
+    # middleware no lo exime): `environment_declarable` mapea lo desconocido a development para
+    # que el descriptor valide contra el contrato, y eso no puede decidir que se publica.
+    docs_url="/docs" if settings.environment == "development" else None,
     redoc_url=None,
 )
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# CORS restrictivo
+# CORS restrictivo: los origenes se declaran en CORS_ORIGINS (separados por coma). NUNCA "*".
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        os.getenv("CORS_ORIGIN_1", "http://localhost:3000"),
-        # Add your frontend origins here
-        
-        os.getenv("API_BASE_URL", "http://localhost:8000"),
-        # Add your frontend origins here
-        
-    ],
+    allow_origins=sorted({*settings.cors_origins, settings.public_base_url}),
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
@@ -61,8 +89,9 @@ app.add_middleware(
 # === AUTH ===
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    # Skip auth for health and schema
-    if request.url.path in ("/health", "/chatgpt-schema"):
+    # Unica ruta libre: el health del servicio, que es lo que sondea un balanceador.
+    # OJO: /admin/v1/health NO esta exento — el contrato lo declara con 401.
+    if request.url.path == "/health":
         return await call_next(request)
 
     api_key = (
@@ -74,7 +103,18 @@ async def auth_middleware(request: Request, call_next):
     # un ValueError si alguno trae un caracter no ASCII, y el header lo escribe quien llama: eso
     # convertiria una credencial mal tipeada en un 500.
     if not (api_key and secrets.compare_digest(api_key.encode("utf-8"), API_KEY.encode("utf-8"))):
-        raise HTTPException(status_code=401, detail="Invalid API key")
+        # SE DEVUELVE LA RESPUESTA, NO SE LEVANTA LA EXCEPCION (arreglado 14-sep-2026). Aca habia
+        # un `raise HTTPException(401)`, y un HTTPException levantado DENTRO de un middleware no
+        # pasa por los handlers de FastAPI: sube hasta el ServerErrorMiddleware, que responde
+        # 500. O sea que TODA request sin credencial recibia "500 Internal Server Error" en vez
+        # de un 401 — el acceso quedaba denegado igual, pero ningun cliente podia distinguir
+        # "te falta la clave" de "el servidor se rompio", y `tests/test_admin_v1.py` lo fija.
+        # El `WWW-Authenticate` lo pide el contrato admin/v1 para el 401.
+        return JSONResponse(
+            {"detail": "Invalid or missing API key.", "code": "unauthorized"},
+            status_code=401,
+            headers={"WWW-Authenticate": 'Bearer realm="medgraph-engine"'},
+        )
 
     return await call_next(request)
 
@@ -85,47 +125,40 @@ async def log_middleware(request: Request, call_next):
     start = time.time()
     response = await call_next(request)
     duration = time.time() - start
-    print(f"{request.method} {request.url.path} -> {response.status_code} ({duration:.2f}s)")
+    # `logging` y no `print`: asi quien despliega elige formato y destino (y en Cloud Logging
+    # cada linea es un registro con su severidad, no texto suelto en stdout).
+    logging.info("%s %s -> %s (%.2fs)", request.method, request.url.path,
+                 response.status_code, duration)
     return response
 
 
+# === ERRORES DE admin/v1 ===
+@app.exception_handler(AdminError)
+async def admin_error_handler(request: Request, exc: AdminError):
+    """El contrato pide `{detail, code}` en la RAIZ: la consola enruta por `code`."""
+    return JSONResponse({"detail": exc.detail, "code": exc.code}, status_code=exc.status)
+
+
 # === ROUTERS ===
-app.include_router(topics.router)
 app.include_router(search.router)
 app.include_router(pathology.router)
 app.include_router(procedure.router)
-app.include_router(activity.router)
-app.include_router(admin.router)
 app.include_router(comprehensive.router)
 app.include_router(ontology_router.router)
 app.include_router(unified.router)
+app.include_router(admin_v1.router)  # contrato admin/v1 (nomos-contracts)
 
 
 # === HEALTH ===
 @app.get("/health")
 async def health():
+    """Sonda del servicio, sin credencial. El health del contrato es /admin/v1/health."""
     try:
         graph.query("RETURN 1")
-        return {"status": "ok", "service": "medgraph-api", "db": "connected"}
+        return {"status": "ok", "service": "medgraph-engine-api", "db": "connected"}
     except Exception:
-        from fastapi.responses import JSONResponse
-        return JSONResponse({"status": "degraded", "service": "medgraph-api", "db": "disconnected"}, 503)
-
-
-@app.get("/chatgpt-schema")
-async def chatgpt_schema():
-    """Schema reducido (5 endpoints) para importar en ChatGPT Actions."""
-    from fastapi.responses import JSONResponse
-    import json
-    for path in [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "chatgpt_action_schema.json"),
-        "/app/chatgpt_action_schema.json",
-        "chatgpt_action_schema.json",
-    ]:
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return JSONResponse(content=json.load(f))
-    return {"error": "schema not found"}
+        return JSONResponse(
+            {"status": "degraded", "service": "medgraph-engine-api", "db": "disconnected"}, 503)
 
 
 @app.get("/stats")

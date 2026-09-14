@@ -1,6 +1,15 @@
-"""Endpoint comprehensive: todo sobre un tema en un solo call."""
+"""Endpoint comprehensive: todo sobre un tema en un solo call.
+
+PODADO EN EL ESPEJO OSS (14-sep-2026). La version de la instancia privada devolvia tambien el
+detalle del `:Tema` y las ACTIVIDADES de catedra (`:Actividad`, `:Documento`) con su material.
+Esos nodos los escriben cargadores privados —una cursada, un cronograma—: ningun script de este
+repo los crea, asi que aca esas dos secciones devolvian listas vacias en cualquier grafo. Quedan
+las tres que este repo SI puede llenar: entidades del grafo (las que extrae `extract_entities.py`
+con el perfil activo), bibliografia (los chunks del pipeline) y ontologia (`ontology.py`).
+"""
 
 from fastapi import APIRouter, Query
+
 from services import graph, vector
 
 router = APIRouter(tags=["comprehensive"])
@@ -11,7 +20,7 @@ async def topic_comprehensive(
     tema: str,
     top_k: int = Query(default=20, description="Chunks de bibliografia a devolver"),
 ):
-    """Devuelve TODO sobre un tema: grafo + actividades + material + bibliografia.
+    """Devuelve TODO sobre un tema: grafo + bibliografia + ontologia.
 
     Orquesta multiples consultas internas y devuelve un paquete completo
     para que el LLM no necesite hacer multiples calls.
@@ -20,17 +29,10 @@ async def topic_comprehensive(
     result = {
         "tema": tema,
         "grafo": {},
-        "actividades": [],
-        "material": [],
         "bibliografia": [],
     }
 
     # 1. Buscar en el grafo semantico (nodos + relaciones)
-    # Buscar como Tema
-    topic_detail = graph.get_topic_detail(tema)
-    if topic_detail:
-        result["grafo"]["tema"] = topic_detail
-
     # Buscar como Patologia
     patologias = graph.get_pathology(tema)
     if patologias:
@@ -46,36 +48,7 @@ async def topic_comprehensive(
     if entidades_dev:
         result["grafo"]["entidades_extraidas"] = entidades_dev
 
-    # 2. Buscar actividades relacionadas (TPs, seminarios, talleres)
-    #    Buscar con el tema original + sinónimos comunes
-    search_terms = [tema]
-    # Agregar sinónimos de entidades encontradas
-    for ent in entidades_dev:
-        if ent.get("sinonimos"):
-            search_terms.extend(ent["sinonimos"][:3])
-
-    actividades = []
-    seen_ids = set()
-    for term in search_terms:
-        results_act = graph.get_activity(term)
-        for a in results_act:
-            if a.get("id") and a["id"] not in seen_ids:
-                seen_ids.add(a["id"])
-                actividades.append(a)
-
-    if actividades:
-        result["actividades"] = actividades
-
-        # Para cada actividad, traer su material
-        for act in actividades:
-            if act.get("id"):
-                material = graph.get_activity_material(act["id"])
-                if material:
-                    for doc in material:
-                        doc["actividad"] = act["nombre"]
-                    result["material"].extend(material)
-
-    # 3. Buscar chunks de bibliografia (hybrid search)
+    # 2. Buscar chunks de bibliografia (hybrid search)
     try:
         search_result = vector.search_hybrid(tema, top_k=top_k)
         if search_result.get("results"):
@@ -98,7 +71,7 @@ async def topic_comprehensive(
     except Exception:
         pass
 
-    # 4. Ontología (ATC + SNOMED)
+    # 3. Ontología (ATC + SNOMED)
     ontologia = {"farmacos_atc": [], "patologias_snomed": [], "query_cruzada": []}
     try:
         # Fármacos → ATC
@@ -158,17 +131,15 @@ async def topic_comprehensive(
 
     result["ontologia"] = ontologia
 
-    # 5. Resumen de fuentes encontradas
+    # 4. Resumen de fuentes encontradas
     fuentes = set()
     for bib in result["bibliografia"]:
         if bib.get("libro"):
             fuentes.add(bib["libro"])
     result["fuentes"] = list(fuentes)
 
-    # 6. Flag de completitud
+    # 5. Flag de completitud
     result["tiene_grafo"] = bool(result["grafo"])
-    result["tiene_actividades"] = bool(result["actividades"])
-    result["tiene_material"] = bool(result["material"])
     result["tiene_bibliografia"] = bool(result["bibliografia"])
     result["tiene_ontologia"] = bool(ontologia["farmacos_atc"] or ontologia["patologias_snomed"])
 

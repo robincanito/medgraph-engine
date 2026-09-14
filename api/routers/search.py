@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 from pydantic import BaseModel
+
 from services import vector
 
 router = APIRouter(prefix="/search", tags=["search"])

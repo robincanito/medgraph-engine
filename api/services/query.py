@@ -133,12 +133,11 @@ def expandir_sinonimos(query_text: str) -> str:
     words = query_text.lower().split()
     expanded = list(words)
 
-    for i, word in enumerate(words):
+    for word in words:
         clean = word.strip(".,;:?!()")
         if clean in SINONIMOS:
             # Agregar sinónimos al final
-            for sin in SINONIMOS[clean]:
-                expanded.append(sin)
+            expanded.extend(SINONIMOS[clean])
 
     # También buscar frases de 2 palabras
     text_lower = query_text.lower()

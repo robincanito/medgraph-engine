@@ -5,8 +5,10 @@ No busca en Neo4j — solo analiza la pregunta y devuelve un plan de ejecución.
 
 import json
 import re
-import os
+
 from google import genai
+
+from services.settings import get_settings
 
 # Reuse existing preprocessing
 try:
@@ -19,7 +21,7 @@ _client = None
 def _get_client():
     global _client
     if _client is None:
-        _client = genai.Client(api_key=os.getenv("GCP_API_KEY", ""))
+        _client = genai.Client(api_key=get_settings().gcp_api_key)
     return _client
 
 
@@ -52,14 +54,13 @@ Valores EXACTOS permitidos para tipo y buscar_en:
 - tipo=signo, buscar_en=Signo (signos clínicos: fiebre, edema, soplo, cianosis)
 - tipo=sintoma, buscar_en=Sintoma (síntomas: otalgia, cefalea, disnea, dolor torácico)
 - tipo=metodo_dx, buscar_en=MetodoDx (métodos diagnósticos: hemograma, ecografía, audiometría)
-- tipo=actividad_academica, buscar_en=Actividad (TPs, seminarios, talleres, guías, contenidos UP)
 
-Valores para intencion: tratamiento|diagnostico|anatomia|fisiologia|clinica|etiologia|clasificacion|procedimiento|actividad|bibliografia|general
+Valores para intencion: tratamiento|diagnostico|anatomia|fisiologia|clinica|etiologia|clasificacion|procedimiento|bibliografia|general
 
-Valores para capas: ONTOLOGY, GRAPH, BIBLIOGRAPHY, ACTIVITIES, DAGS
+Valores para capas: ONTOLOGY, GRAPH, BIBLIOGRAPHY, DAGS
 
 Reglas para decidir capas:
-- BIBLIOGRAPHY y ACTIVITIES siempre incluir
+- BIBLIOGRAPHY siempre incluir
 - Si hay patologia, farmaco, clase_farmacologica o sistema_corporal → agregar ONTOLOGY y GRAPH
 - Si hay signo, sintoma, procedimiento, metodo_dx o anatomia → agregar ONTOLOGY y GRAPH (procedimientos, signos y anatomía también están clasificados en SNOMED)
 - Si pregunta "qué hago ante", "cómo manejar", "paciente con" → agregar DAGS
@@ -71,19 +72,10 @@ sub_queries: genera 3 reformulaciones especializadas para búsqueda en textos m�
 EJEMPLOS:
 
 Q: "qué diuréticos se usan en insuficiencia cardíaca"
-{{"entidades":[{{"texto":"diuréticos","tipo":"clase_farmacologica","buscar_en":"CategoriaATC"}},{{"texto":"insuficiencia cardíaca","tipo":"patologia","buscar_en":"Patologia"}}],"intencion":"tratamiento","capas":["ONTOLOGY","GRAPH","BIBLIOGRAPHY","ACTIVITIES"],"sub_queries":["diuréticos tratamiento insuficiencia cardíaca","furosemida hidroclorotiazida espironolactona IC dosis","insuficiencia cardíaca manejo farmacológico guías"]}}
-
-Q: "preparame para el TP de otoscopía"
-{{"entidades":[{{"texto":"TP otoscopía","tipo":"actividad_academica","buscar_en":"Actividad"}},{{"texto":"otoscopía","tipo":"procedimiento","buscar_en":"Procedimiento"}}],"intencion":"procedimiento","capas":["ACTIVITIES","GRAPH","ONTOLOGY","BIBLIOGRAPHY"],"sub_queries":["otoscopía técnica pasos procedimiento","guía TP otoscopía lista cotejo","membrana timpánica hallazgos normales patológicos otoscopía"]}}
+{{"entidades":[{{"texto":"diuréticos","tipo":"clase_farmacologica","buscar_en":"CategoriaATC"}},{{"texto":"insuficiencia cardíaca","tipo":"patologia","buscar_en":"Patologia"}}],"intencion":"tratamiento","capas":["ONTOLOGY","GRAPH","BIBLIOGRAPHY"],"sub_queries":["diuréticos tratamiento insuficiencia cardíaca","furosemida hidroclorotiazida espironolactona IC dosis","insuficiencia cardíaca manejo farmacológico guías"]}}
 
 Q: "paciente con otalgia y fiebre qué hago"
-{{"entidades":[{{"texto":"otalgia","tipo":"sintoma","buscar_en":"Sintoma"}},{{"texto":"fiebre","tipo":"signo","buscar_en":"Signo"}}],"intencion":"clinica","capas":["DAGS","GRAPH","ONTOLOGY","BIBLIOGRAPHY","ACTIVITIES"],"sub_queries":["otalgia fiebre diagnóstico diferencial","otitis media aguda diagnóstico tratamiento","manejo clínico otalgia aguda evaluación otoscópica"]}}
-
-Q: "contenidos unidad 1"
-{{"entidades":[{{"texto":"unidad 1","tipo":"actividad_academica","buscar_en":"Actividad"}},{{"texto":"contenidos","tipo":"actividad_academica","buscar_en":"Actividad"}}],"intencion":"actividad","capas":["ACTIVITIES","BIBLIOGRAPHY"],"sub_queries":["contenidos unidad 1 temas unidad","guía contenidos first unit","unit 1 core topics fundamentals introduction"],"ambigua":false,"clarificacion":null}}
-
-Q: "resumen completo del curso"
-{{"entidades":[{{"texto":"course","tipo":"actividad_academica","buscar_en":"Actividad"}}],"intencion":"actividad","capas":["ACTIVITIES","BIBLIOGRAPHY"],"sub_queries":["contenidos curso temas unidades","guía contenidos del curso"],"ambigua":true,"clarificacion":{{"pregunta":"The course has multiple units. ¿Sobre cuál querés el resumen?","opciones":["Unit 1: Introduction and fundamentals","Unit 2: Core concepts","Unit 3: Advanced topics","Unit 4: Applied knowledge","All units"]}}}}
+{{"entidades":[{{"texto":"otalgia","tipo":"sintoma","buscar_en":"Sintoma"}},{{"texto":"fiebre","tipo":"signo","buscar_en":"Signo"}}],"intencion":"clinica","capas":["DAGS","GRAPH","ONTOLOGY","BIBLIOGRAPHY"],"sub_queries":["otalgia fiebre diagnóstico diferencial","otitis media aguda diagnóstico tratamiento","manejo clínico otalgia aguda evaluación otoscópica"]}}
 
 Pregunta: {pregunta}"""
 
@@ -129,17 +121,11 @@ _TYPE_NORMALIZE = {
     "signo": ("signo", "Signo"),
     "sintoma": ("sintoma", "Sintoma"),
     "síntoma": ("sintoma", "Sintoma"),
-    "hallazgo": ("signo", "Signo"),
     # Diagnóstico
     "metodo_dx": ("metodo_dx", "MetodoDx"),
     "metodo diagnostico": ("metodo_dx", "MetodoDx"),
     "prueba": ("metodo_dx", "MetodoDx"),
     "test": ("metodo_dx", "MetodoDx"),
-    # Actividades
-    "actividad_academica": ("actividad_academica", "Actividad"),
-    "actividad": ("actividad_academica", "Actividad"),
-    "tp": ("actividad_academica", "Actividad"),
-    "documento": ("actividad_academica", "Actividad"),
     # Tipos genéricos que Gemini inventa
     "agente": ("patologia", "Agente"),
     "agente_infeccioso": ("patologia", "Agente"),
@@ -173,7 +159,6 @@ _BUSCAR_EN_NORMALIZE = {
     "signos": "Signo",
     "sintomas": "Sintoma",
     "sistemas": "CategoriaSNOMED",
-    "actividades": "Actividad",
     "patologias": "Patologia",
 }
 
@@ -211,6 +196,7 @@ def analyze_query(pregunta: str) -> dict:
 
     # 2. Gemini clasifica via Google GenAI
     client = _get_client()
+    resp = None
     try:
         resp = client.models.generate_content(
             model="gemini-2.5-flash",
@@ -277,10 +263,10 @@ def analyze_query(pregunta: str) -> dict:
     except Exception as e:
         # Log the error AND the raw response for debugging
         import logging
-        try:
-            raw = response.text[:300] if 'response' in dir() and hasattr(response, 'text') else 'no response'
-        except:
-            raw = 'no response'
+        # `resp` Y NO `response` (arreglado 14-sep-2026): la respuesta se llama `resp`, asi que
+        # `'response' in dir()` era siempre falso y este log -que existe para poder ver QUE
+        # devolvio el modelo cuando el JSON no parsea- decia "no response" en todos los casos.
+        raw = (getattr(resp, "text", None) or "no response")[:300]
         logging.error(f"Gemini analyzer failed: {type(e).__name__}: {str(e)[:200]} | Raw: {raw}")
         # Fallback determinista
         result = _fallback_analysis(pregunta, pre)
@@ -300,10 +286,11 @@ def analyze_query(pregunta: str) -> dict:
         analysis["ambigua"] = True
         analysis["clarificacion"] = result.get("clarificacion")
 
-    # BIBLIOGRAPHY y ACTIVITIES siempre activas (somos un sistema para estudiantes)
-    for capa_base in ["BIBLIOGRAPHY", "ACTIVITIES"]:
-        if capa_base not in analysis["capas"]:
-            analysis["capas"].append(capa_base)
+    # BIBLIOGRAPHY siempre activa: los chunks del pipeline son lo unico que TODO grafo de este
+    # repo tiene. (La capa ACTIVITIES de la instancia privada se podo: buscaba :Actividad y
+    # :Documento, que ningun script de este repo escribe.)
+    if "BIBLIOGRAPHY" not in analysis["capas"]:
+        analysis["capas"].append("BIBLIOGRAPHY")
 
     return analysis
 
@@ -312,15 +299,9 @@ def _fallback_analysis(pregunta: str, pre: dict = None) -> dict:
     """Análisis determinista como fallback si Gemini falla."""
     pregunta_lower = pregunta.lower()
 
-    capas = ["BIBLIOGRAPHY", "ACTIVITIES"]
+    capas = ["BIBLIOGRAPHY"]
     entidades = []
     intencion = pre.get("intencion", "general") if pre else "general"
-
-    # Detectar actividades
-    activity_keywords = ["tp", "seminario", "taller", "acreditación", "acreditacion", "guía", "guia", "lista de cotejo"]
-    if any(kw in pregunta_lower for kw in activity_keywords):
-        capas.append("ACTIVITIES")
-        entidades.append({"texto": pregunta, "tipo": "actividad_academica", "buscar_en": "Actividad"})
 
     # Detectar intención clínica
     clinical_keywords = ["qué hago", "que hago", "cómo manejar", "como manejar", "ante un paciente", "manejo de"]

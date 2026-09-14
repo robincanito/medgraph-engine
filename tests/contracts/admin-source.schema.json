@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nomos.unicrono.com/contracts/admin-source/v1",
+  "title": "AdminSource",
+  "description": "Una fuente ingestada, vista por la consola: la forma comun de un :Book de MedGraph (unidad = chunk), una :Ley de LexGraph (unidad = articulo) o la doctrina comentada (unidad = chunk). Los campos propios del dominio van en `fields`, cuyas claves las declara AdminDescriptor.source_fields; todo lo demas (stats, estado, linaje) es igual en cualquier grafo. Es la respuesta de GET /admin/v1/sources/{id} y el item de GET /admin/v1/sources. Ver openapi/admin-v1.yaml.",
+  "type": "object",
+  "required": ["id", "kind", "title", "fields", "stats", "status", "updated_at"],
+  "properties": {
+    "id": { "type": "string", "description": "Identificador estable de la fuente en su grafo (hoy libro_id en MedGraph, id de la ley en LexGraph)." },
+    "kind": { "type": "string", "description": "Uno de AdminDescriptor.source_kinds[].id." },
+    "title": { "type": "string", "description": "Titulo legible; si el grafo no tiene uno, el backend deriva uno del id." },
+    "fields": {
+      "type": "object",
+      "description": "Metadata del dominio. Claves = AdminDescriptor.source_fields[].name; valores segun su type. Un campo ausente se muestra vacio; uno no declarado se ignora. Los no editables tambien viajan aca (solo lectura en la consola).",
+      "additionalProperties": true
+    },
+    "stats": {
+      "type": "object",
+      "description": "Cobertura de la fuente en el grafo. `units` cuenta la unidad declarada para su kind.",
+      "required": ["units", "units_embedded"],
+      "properties": {
+        "units": { "type": "integer", "minimum": 0, "description": "Unidades indexables cargadas (chunks, articulos)." },
+        "units_embedded": { "type": "integer", "minimum": 0, "description": "Unidades con embedding. 0 por diseño en fuentes que no se vectorizan (norma pura: la cita es lookup exacto)." },
+        "units_canonical": { "type": ["integer", "null"], "minimum": 0, "description": "Unidades con embedding_forma canonica (MedGraph, tanda 2b). Null si no aplica." },
+        "entities": { "type": ["integer", "null"], "minimum": 0, "description": "Entidades extraidas que la fuente menciona. Null si la instancia no extrae." },
+        "relations": { "type": ["integer", "null"], "minimum": 0 },
+        "pages": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "parcial", "degradado", "en_proceso", "fallido"],
+      "description": "Semaforo derivado por el backend. ok = cargada y completa; parcial = faltan embeddings o entidades que deberian estar; degradado = texto ilegible u otra calidad insuficiente (text_quality != ok); en_proceso = hay un job activo (active_job_id); fallido = el ultimo job fallo."
+    },
+    "status_detail": { "type": ["string", "null"], "description": "Una frase que explica el status cuando no es ok (o una aclaracion, ej: 'norma pura: sin embeddings por diseño')." },
+    "lineage": {
+      "type": ["object", "null"],
+      "description": "Procedencia (Arché): con que corrida, perfil y por que via entro. Null para fuentes anteriores al linaje.",
+      "properties": {
+        "job_id": { "type": ["string", "null"], "description": "Ultimo IngestJob que la cargo o re-cargo." },
+        "profile": { "type": ["string", "null"], "description": "perfil@version con que se extrajo (lineage.profile)." },
+        "ingested_at": { "type": ["string", "null"], "description": "ISO 8601" },
+        "ingested_by": { "type": ["string", "null"], "enum": ["cli", "api", "consola", "legacy", null] },
+        "corpus_version": { "type": ["string", "null"], "description": "Version de corpus (LexGraph: CorpusVersion). Null si el dominio no versiona." }
+      }
+    },
+    "active_job_id": { "type": ["string", "null"], "description": "Job en curso sobre esta fuente, si status=en_proceso." },
+    "created_at": { "type": ["string", "null"], "description": "ISO 8601" },
+    "updated_at": { "type": "string", "description": "ISO 8601. Cambia con cada PATCH o re-ingesta." }
+  },
+  "additionalProperties": false
+}

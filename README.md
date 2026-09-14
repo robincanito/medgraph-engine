@@ -75,10 +75,12 @@ pipeline/            ← the canonical implementation of each step (MIRROR — s
   embeddings.py        canonical embedding text, provider call, retry/second-pass policy
   eventos.py           named events (logging only — no dependency on the private logger)
 profiles/            ← domain profiles: medicina.yaml (default), generico.yaml
-api/                 ← FastAPI service (v1.0-era; see Known gaps — it does not start as-is)
+api/                 ← the FastAPI service: query routes + admin/v1 (read-only). It starts.
 dags/                ← clinical reasoning flows (YAML)
-tests/               ← the suite: regression of the pipeline + repo health
-docker-compose.yml   ← local Neo4j for development
+tests/               ← the suite: pipeline regression + the API + repo health
+  contracts/           vendored JSON Schemas of nomos-contracts (a test keeps them identical)
+Dockerfile           ← the API image. Build context = the repo root (it needs pipeline/ too)
+docker-compose.yml   ← local Neo4j + the API for development
 ```
 
 ### Root scripts: what is alive and what is legacy
@@ -152,7 +154,7 @@ git clone https://github.com/robincanito/medgraph-engine.git
 cd medgraph-engine
 python -m venv .venv && . .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt                  # pipeline + suite (ruff, pytest)
-pip install -r api/requirements.txt              # only if you want to run the API
+pip install -r api/requirements.txt              # to run the API (and its tests)
 cp .env.example .env                             # then edit it
 ```
 
@@ -236,12 +238,66 @@ vectorize → extract entities). Two honest caveats:
 ### The API
 
 ```bash
-cd api && uvicorn main:app --reload      # http://localhost:8000/docs
+pip install -r api/requirements.txt
+cd api && uvicorn main:app --reload      # http://localhost:8000/docs (with ENVIRONMENT=development)
 ```
 
-`POST /query` is the unified entry point (an LLM router decides which layers to activate);
-`POST /search/hybrid` fuses vector and BM25 with RRF; there are per-topic, pathology, procedure and
-ontology routes. **It does not start as shipped** — see Known gaps.
+It refuses to start without `API_KEY` — an empty key used to authorize every request that carried
+no header — and every route except `/health` needs it: `Authorization: Bearer $API_KEY` (or
+`X-API-Key`). Missing or wrong is a **401** with `WWW-Authenticate`.
+
+**Query** — what the graph already holds:
+
+| Route | What it answers | Needs |
+|---|---|---|
+| `POST /search/hybrid` | BM25 + vector, fused with RRF. The default. | Vertex (it embeds the question) |
+| `POST /search/semantic`, `POST /search/keyword` | Each half on its own. | Vertex / nothing |
+| `POST /query` | An LLM router decides which layers to activate and composes the answer. | `GCP_API_KEY` |
+| `GET /topic/{t}/comprehensive` | Entities + bibliography + ontology in one call. | Vertex |
+| `GET /topic/{t}/pathways`, `/clinical` | The DAGs loaded by `load_dags.py`. | — |
+| `GET /topic/{t}/ontology` | ATC / SNOMED hierarchies (`ontology.py`). | — |
+| `GET /pathology/{n}`, `/pathology/{n}/differential`, `/procedure/{n}` | Typed entities and what hangs off them. | — |
+| `GET /health`, `GET /stats` | Liveness (no credential) and node / relationship counts. | — |
+
+**Administration** — `admin/v1`, the contract every Nomos graph implements so that a single console
+can administer it without knowing the domain. The shape is pinned by the JSON Schemas vendored in
+`tests/contracts/`, and every response in the suite is validated against them:
+
+| Route | What it returns |
+|---|---|
+| `GET /admin/v1/descriptor` | Vocabulary, source fields, pipeline steps, capabilities. **Built from the active profile**, not from constants: `PROFILE=generico` changes the domain, the entity types and the relation types with no code change. |
+| `GET /admin/v1/health` | `{status, graph, checked_at}`. 200 even when the graph is down — a health check that fails together with its dependency diagnoses nothing. |
+| `GET /admin/v1/stats` | Counts by label and by relationship type, plus sources / units / units embedded. Cached for 10 minutes. |
+| `GET /admin/v1/sources` | A page of sources: `q`, `kind`, `status`, `filter[<field>]`, `sort`, `limit`, `cursor`. |
+| `GET /admin/v1/sources/{id}` | One source, or a 404 as `{detail, code}`. |
+
+Read-only, and the descriptor says so: **every capability is published `false`**, each with a note
+(`kind: not_built`, the reason, and what it would take to build it). The contract is explicit that
+publishing a capability without an endpoint is lying to the console — so uploads, jobs,
+classification, review, PATCH, DELETE, re-ingest, facets, the unit viewer and vectorize are all
+declared off. Authentication is the single API key (`auth.schemes: ["api_key"]`): there is no Clerk
+and no role model here, and the descriptor does not pretend otherwise.
+
+A source is a `:Book` written by `carga.registrar_fuente` — **and also** a `libro_id` that exists
+only in chunks, which is what you get if you call `carga.cargar_libro` and stop there. Those are
+listed too, with a `status_detail` telling you to register them: an empty console over a full graph
+would be worse than a missing field.
+
+#### What this mirror does NOT expose, and why
+
+The v1.0 copy of `api/` also carried the private instance's routes. They were removed on
+2026-09-14, in the same batch that made the service start — an API that is smaller but starts
+beats one that is bigger and answers with empty lists:
+
+| Gone | Why |
+|---|---|
+| `GET /topics/{up_id}`, `/{up_id}/related`, `/{tema}/detail` | They read `:UP`, `:Tema` and `:Fuente` — a course's curriculum. No script in this repo writes those nodes. |
+| `GET /activity/*` (list, search, material) | They read `:Actividad` and `:Documento` (lab sessions, seminars and their handouts). Same reason; the `ACTIVITIES` layer of `POST /query` went with them. |
+| `POST /admin/ingest`, `GET /admin/ingest/{job_id}` | `services/ingest.py` had its **own** parser and a destructive upload (delete, then create), i.e. the exact opposite of `pipeline/carga.py`. Ingestion here runs through `pipeline/` from your own script. |
+| `GET /chatgpt-schema` | It served a curated JSON file that is not in this repo. |
+| `routers/clinical.py` | A dead duplicate of two routes in `comprehensive.py`; it was never mounted. |
+
+`GET /topic/{t}/comprehensive` survived, minus its `:Tema` and activities sections.
 
 ### The MCP server
 
@@ -251,6 +307,11 @@ ontology routes. **It does not start as shipped** — see Known gaps.
 `medgraph_ontology`, `medgraph_cronograma`). It talks HTTP to a running MedGraph API
 (`MEDGRAPH_API_URL`, `API_KEY`), so it inherits whatever state the API is in. `medgraph_cronograma`
 calls a *separate* schedule API of your own (`SCHEDULE_API_URL`), not MedGraph.
+
+Heads-up after the prune above: `medgraph_activity` and `medgraph_activity_material` call routes
+this mirror no longer exposes, and `medgraph_cronograma` never pointed here. Against the API in
+this repo they 404; against a private instance that still serves them they work, which is why the
+tools are left in place instead of deleted.
 
 ```bash
 pip install mcp httpx          # not in requirements.txt: the pipeline does not need them
@@ -319,10 +380,15 @@ change.
 ## Tests
 
 ```bash
-pip install -r requirements.txt
-pytest                                                  # the whole suite
-ruff check pipeline tests parser_v2.py migrate_chunks.py  # the lint gate (same as CI)
+pip install -r requirements.txt -r api/requirements.txt      # the second one only for the API tests
+pytest                                                       # the whole suite
+ruff check pipeline tests api parser_v2.py migrate_chunks.py # the lint gate (same as CI)
 ```
+
+`tests/test_admin_v1.py` boots the API, so it needs `api/requirements.txt`. Without it that one
+file **skips itself** with a message saying what to install — cloning this repo to use only the
+pipeline should not hand you a red suite. CI exports `MEDGRAPH_ENGINE_REQUIRE_API=1`, and there
+that skip is a failure: the tests that guard the API cannot go quiet because an install step broke.
 
 A bare `pytest` run **never touches the network, a graph, or a key**. The embedding client is a
 double, the graph is a pair of functions that record what they were asked to write, the PDFs are
@@ -336,6 +402,7 @@ retries is injected — so the suite runs in well under a second.
 | `tests/test_pipeline_carga.py` | MERGE not CREATE, orphan deletion, embedding invalidation on text change, derived relationships, fail-closed guards, source registration and deletion. |
 | `tests/test_pipeline_estrategia.py` | The historical default byte for byte, profiles overriding it, incoherent numbers failing closed, and every YAML in `profiles/` loading and compiling. |
 | `tests/test_pipeline_eventos.py` | Event names, fields, reserved field names, errors re-raised, and that no module under `pipeline/` imports the private logger (it only gets `logging`). |
+| `tests/test_admin_v1.py` | `admin/v1`: the descriptor and every source validate against the contract's schemas; the descriptor comes from the **active profile** (switching to `generico` changes it end to end); every capability published `false` explains why and how; 401 without a credential, `{detail, code}` on 404, 503 when the graph is down — and a `/admin/v1/health` that still answers 200. The graph is a double: no Neo4j, no network. |
 | `tests/test_repo.py` | Repo health: every Python file parses, every dependency is declared, no credential-shaped string anywhere. |
 | `tests/test_basic.py` | The v1.0 tests of the root scripts (entity extraction, deduplication) — kept because they are green and cover code nothing else covers. |
 
@@ -343,8 +410,8 @@ Markers are declared in `pytest.ini` for tests that would need a real provider (
 a live Neo4j (`neo4j`). There are none today, and both are deselected by default: a marker exists
 so that adding such a test later does not silently make `pytest` spend money.
 
-CI (`.github/workflows/ci.yml`) runs exactly the two commands above on Python 3.13, with no
-secrets in the job.
+CI (`.github/workflows/ci.yml`) runs exactly the commands above on Python 3.13, with no secrets in
+the job.
 
 ---
 
@@ -359,12 +426,15 @@ Stated because a README that hides this wastes your afternoon:
 - **No orchestrator.** There is no single command that runs parse → load → vectorize through
   `pipeline/`. `quickstart.py` does it through the legacy scripts. Use the snippets above, or
   write the ten lines you need.
-- **The API does not start.** `api/services/vector.py` was replicated with the retrieval fixes and
-  imports `services.settings`, a module that was never copied into this repo, so
-  `from services import vector` raises `ModuleNotFoundError` and every router that touches search
-  fails. The rest of `api/` is still the v1.0 copy: its `services/ingest.py` has its **own**
-  parser and its own destructive upload, i.e. it is not the pipeline in `pipeline/`. Treat `api/`
-  as a reference implementation, not as a deployable service, until it is re-replicated.
+- **`admin/v1` is read-only.** The five GET routes of the contract are implemented; every write
+  (uploads, jobs, classification, review, PATCH, DELETE, re-ingest) and the two optional read
+  extras (facets, the unit viewer) are not. The descriptor publishes each one as `false` with a
+  note saying what it would take, so a console can show *why* a button is missing instead of a
+  screen with something absent.
+- **The `/query` router is not profile-driven.** `services/analyzer.py` prompts an LLM with a
+  hardcoded medical vocabulary (`Patologia`, `Farmaco`, `CategoriaATC`...). It is the v1.0 router,
+  kept because it works, but it does not read `profiles/` the way the descriptor and the parser do.
+  On a non-medical profile use `/search/hybrid`, which is domain-neutral.
 - **No QA bank, no golden corpus.** The private side tests the load and the retrieval against a
   throwaway Neo4j in Docker and pins the parser output with golden files over a 27-cell
   format × domain matrix. Here the graph-facing tests assert the *statements* against doubles.
@@ -379,8 +449,11 @@ Stated because a README that hides this wastes your afternoon:
 
 MedGraph Engine is the open-source pipeline of **Nomos Graph**, the graph layer of the Nomos
 Research Facility ecosystem (a medical instance, a legal one, a clinical one, plus an admin
-console). The private side adds what is specific to running it as a service: the orchestrator, the
-`admin/v1` API the console speaks to, the QA bank, per-domain profiles and the operational tooling.
+console). `admin/v1`, the contract that console speaks, is implemented here too: this repo is
+its third implementation, and the one that shows the spec is enough — that someone outside
+can write one without being inside. The private side adds what is specific to running it as a
+service: the orchestrator, the write half of `admin/v1`, the QA bank, per-domain profiles and
+the operational tooling.
 
 What lives here is the part that is worth sharing: the pipeline, with its scars documented.
 

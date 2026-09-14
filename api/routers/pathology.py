@@ -1,6 +1,7 @@
 """Endpoints de patologías."""
 
 from fastapi import APIRouter
+
 from services import graph
 
 router = APIRouter(prefix="/pathology", tags=["pathology"])

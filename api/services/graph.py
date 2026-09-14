@@ -1,19 +1,32 @@
-"""Servicio de consultas al grafo Neo4j. Operaciones predefinidas, no queries abiertas."""
+"""Servicio de consultas al grafo Neo4j. Operaciones predefinidas, no queries abiertas.
 
-import os
+LA CONEXION SALE DE `services/settings.py` (14-sep-2026) y no de cuatro `os.getenv` propios: un
+valor leido en dos lugares diverge en silencio, y aca ademas el `.strip()` del saneador de bordes
+es lo que salva a quien pegue una password con un `
+` invisible al final.
+
+QUE SE PODO DE ESTE ARCHIVO EN EL ESPEJO OSS: las consultas de `:UP`, `:Tema`, `:Fuente`,
+`:Actividad` y `:Documento` (temas por unidad problematica, actividades de catedra y su material).
+Ningun script de este repo escribe esos nodos —son de la cursada que administra la instancia
+privada—, asi que aca eran funciones que devolvian [] contra cualquier grafo. Lo que queda son las
+consultas sobre lo que este repo SI crea: chunks (pipeline/carga.py), entidades del perfil activo
+(extract_entities.py), ontologia (ontology.py) y DAGs (load_dags.py).
+"""
+
 import logging
 import threading
 import time
+
 from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable, SessionExpired
-from dotenv import load_dotenv
 
-load_dotenv()
+from services.settings import get_settings
 
-URI = os.getenv("NEO4J_URI")
-USER = os.getenv("NEO4J_USERNAME")
-PASSWORD = os.getenv("NEO4J_PASSWORD")
-DATABASE = os.getenv("NEO4J_DATABASE")
+_s = get_settings()
+URI = _s.neo4j_uri
+USER = _s.neo4j_username
+PASSWORD = _s.neo4j_password
+DATABASE = _s.neo4j_database
 
 _keepalive_started = False
 
@@ -89,49 +102,6 @@ def write(cypher: str, params: dict = None, retries: int = 2):
                 raise
 
 
-# === TOPICS ===
-
-def get_topics_by_up(up_id: str) -> list:
-    return query("""
-    MATCH (t:Tema)-[:PERTENECE_A]->(up:UP {id: $up_id})
-    OPTIONAL MATCH (t)-[:CONTENIDO_EN]->(f:Fuente)
-    OPTIONAL MATCH (t)-[:AREA_DE]->(e:Especialidad)
-    RETURN t.nombre AS tema, t.descripcion AS descripcion,
-           e.nombre AS especialidad,
-           collect(DISTINCT {titulo: f.titulo, id: f.id}) AS fuentes
-    ORDER BY e.nombre, t.nombre
-    """, {"up_id": up_id})
-
-
-def get_related_topics(up_id: str) -> list:
-    return query("""
-    MATCH (up1:UP {id: $up_id})<-[:PERTENECE_A]-(t1:Tema)-[:TRATA]->(concepto)
-    MATCH (concepto)<-[:TRATA]-(t2:Tema)-[:PERTENECE_A]->(up2:UP)
-    WHERE up1 <> up2
-    RETURN t1.nombre AS tema_origen, concepto.nombre AS concepto_compartido,
-           t2.nombre AS tema_relacionado, up2.id AS up_relacionada, up2.nombre AS up_nombre
-    """, {"up_id": up_id})
-
-
-def get_topic_detail(tema_nombre: str) -> dict:
-    results = query("""
-    MATCH (t:Tema {nombre: $nombre})
-    OPTIONAL MATCH (t)-[:TRATA]->(p:Patologia)
-    OPTIONAL MATCH (p)-[:SE_DIAGNOSTICA_CON]->(dx:MetodoDx)
-    OPTIONAL MATCH (p)-[:SE_TRATA_CON]->(tx)
-    OPTIONAL MATCH (p)-[:PRESENTA]->(s:Signo)
-    OPTIONAL MATCH (t)-[:CONTENIDO_EN]->(f:Fuente)
-    OPTIONAL MATCH (t)-[:INCLUYE]->(proc:Procedimiento)
-    RETURN t.nombre AS tema, t.descripcion AS descripcion,
-           collect(DISTINCT {nombre: p.nombre, definicion: p.definicion, cie10: p.cie10}) AS patologias,
-           collect(DISTINCT dx.nombre) AS metodos_dx,
-           collect(DISTINCT s.nombre) AS signos,
-           collect(DISTINCT {titulo: f.titulo, id: f.id}) AS fuentes,
-           collect(DISTINCT proc.nombre) AS procedimientos
-    """, {"nombre": tema_nombre})
-    return results[0] if results else None
-
-
 # === PATHOLOGY ===
 
 def get_pathology(nombre: str) -> list:
@@ -188,114 +158,6 @@ def get_procedure(nombre: str) -> list:
 
 # === STATS ===
 
-# === ACTIVITIES ===
-
-def get_activity(nombre: str) -> list:
-    """Busca actividades (TP, Seminario, Taller, Acreditacion) por nombre, titulo o temas.
-
-    Busca por frase completa y por palabras individuales (>= 4 chars) para
-    maximizar matches. Ej: "rinoscopia anterior" matchea titulo "Rinoscopia".
-    """
-    # Primero intento con la frase completa
-    results = query("""
-    MATCH (a:Actividad)
-    WHERE toLower(a.nombre) CONTAINS toLower($nombre)
-       OR toLower(a.titulo) CONTAINS toLower($nombre)
-       OR toLower(a.id) CONTAINS toLower($nombre)
-    OPTIONAL MATCH (a)-[:ABORDA]->(t:Tema)
-    OPTIONAL MATCH (a)-[:PRACTICA]->(proc:Procedimiento)
-    OPTIONAL MATCH (a)-[:TIENE_DOCUMENTO]->(d:Documento)
-    OPTIONAL MATCH (a)-[:PERTENECE_A]->(up:UP)
-    RETURN a.id AS id, a.nombre AS nombre, a.titulo AS titulo, a.tipo AS tipo,
-           up.nombre AS unidad_problematica, up.id AS up_id,
-           collect(DISTINCT t.nombre) AS temas,
-           collect(DISTINCT proc.nombre) AS procedimientos,
-           collect(DISTINCT {id: d.id, nombre: d.nombre, tipo: d.tipo, archivo: d.archivo}) AS documentos
-    """, {"nombre": nombre})
-
-    if results:
-        return results
-
-    # Fallback: buscar por cada palabra individual (>= 4 chars)
-    words = [w for w in nombre.lower().split() if len(w) >= 4]
-    if not words:
-        return []
-
-    # Buscar actividades cuyo titulo contenga alguna de las palabras
-    for word in words:
-        results = query("""
-        MATCH (a:Actividad)
-        WHERE toLower(a.titulo) CONTAINS toLower($word)
-           OR toLower(a.nombre) CONTAINS toLower($word)
-        OPTIONAL MATCH (a)-[:ABORDA]->(t:Tema)
-        OPTIONAL MATCH (a)-[:PRACTICA]->(proc:Procedimiento)
-        OPTIONAL MATCH (a)-[:TIENE_DOCUMENTO]->(d:Documento)
-        OPTIONAL MATCH (a)-[:PERTENECE_A]->(up:UP)
-        RETURN a.id AS id, a.nombre AS nombre, a.titulo AS titulo, a.tipo AS tipo,
-               up.nombre AS unidad_problematica, up.id AS up_id,
-               collect(DISTINCT t.nombre) AS temas,
-               collect(DISTINCT proc.nombre) AS procedimientos,
-               collect(DISTINCT {id: d.id, nombre: d.nombre, tipo: d.tipo, archivo: d.archivo}) AS documentos
-        """, {"word": word})
-        if results:
-            return results
-
-    # Último fallback: buscar en temas que aborda la actividad
-    for word in words:
-        results = query("""
-        MATCH (a:Actividad)-[:ABORDA]->(t:Tema)
-        WHERE toLower(t.nombre) CONTAINS toLower($word)
-        OPTIONAL MATCH (a)-[:PRACTICA]->(proc:Procedimiento)
-        OPTIONAL MATCH (a)-[:TIENE_DOCUMENTO]->(d:Documento)
-        OPTIONAL MATCH (a)-[:PERTENECE_A]->(up:UP)
-        RETURN a.id AS id, a.nombre AS nombre, a.titulo AS titulo, a.tipo AS tipo,
-               up.nombre AS unidad_problematica, up.id AS up_id,
-               collect(DISTINCT t.nombre) AS temas,
-               collect(DISTINCT proc.nombre) AS procedimientos,
-               collect(DISTINCT {id: d.id, nombre: d.nombre, tipo: d.tipo, archivo: d.archivo}) AS documentos
-        """, {"word": word})
-        if results:
-            return results
-
-    return []
-
-
-def list_activities(up_id: str = None, tipo: str = None) -> list:
-    """Lista actividades filtradas por UP y/o tipo."""
-    where_clauses = []
-    params = {}
-
-    if up_id:
-        where_clauses.append("up.id = $up_id")
-        params["up_id"] = up_id
-    if tipo:
-        where_clauses.append("a.tipo = $tipo")
-        params["tipo"] = tipo
-
-    where = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
-
-    return query(f"""
-    MATCH (a:Actividad)-[:PERTENECE_A]->(up:UP)
-    {where}
-    OPTIONAL MATCH (a)-[:ABORDA]->(t:Tema)
-    RETURN a.id AS id, a.nombre AS nombre, a.titulo AS titulo, a.tipo AS tipo,
-           up.id AS up_id, collect(DISTINCT t.nombre) AS temas
-    ORDER BY a.nombre
-    """, params)
-
-
-def get_activity_material(activity_id: str) -> list:
-    """Devuelve el contenido completo de los documentos vinculados a una actividad."""
-    return query("""
-    MATCH (a:Actividad {id: $id})-[:TIENE_DOCUMENTO]->(d:Documento)
-    RETURN d.id AS doc_id, d.nombre AS nombre, d.tipo AS tipo,
-           d.archivo AS archivo, d.texto AS texto, d.palabras AS palabras
-    ORDER BY d.tipo, d.nombre
-    """, {"id": activity_id})
-
-
-# === STATS ===
-
 def get_stats() -> dict:
     nodos = query("MATCH (n) RETURN labels(n)[0] AS tipo, count(n) AS cantidad ORDER BY cantidad DESC")
     rels = query("MATCH ()-[r]->() RETURN type(r) AS tipo, count(r) AS cantidad ORDER BY cantidad DESC")
@@ -305,3 +167,18 @@ def get_stats() -> dict:
         "nodos": {n["tipo"]: n["cantidad"] for n in nodos},
         "relaciones": {r["tipo"]: r["cantidad"] for r in rels}
     }
+
+
+def db_state() -> str:
+    """`connected` | `down`, para GET /admin/v1/health.
+
+    NUNCA `sleeping`: ese estado del contrato es para una instancia cuyo grafo vive apagado a
+    proposito y se despierta con una consulta real. Este repo no administra infraestructura, asi
+    que un grafo que no contesta es un grafo caido y se dice asi.
+    """
+    try:
+        query("RETURN 1", retries=0)
+        return "connected"
+    except Exception as e:
+        logging.warning(f"Neo4j no responde: {e}")
+        return "down"

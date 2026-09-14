@@ -1,6 +1,7 @@
 """Endpoint de ontología — traversal jerárquico ATC + SNOMED."""
 
 from fastapi import APIRouter
+
 from services.graph import query as read
 
 router = APIRouter(tags=["ontology"])
