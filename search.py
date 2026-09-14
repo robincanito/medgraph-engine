@@ -7,7 +7,17 @@ import sys
 from collections import defaultdict
 
 PARSED_DIR = os.path.join(os.path.dirname(__file__), "parsed")
+# TU catalogo es `catalog.json` y NO viaja en el repo: es la lista de los documentos que vos
+# ingestaste. Si no existe se LEE `catalog.example.json` -dos entradas inventadas con la forma
+# esperada-, para que un clon recien hecho corra en vez de morir con un FileNotFoundError. Lo que
+# se ESCRIBE va siempre a `catalog.json`: el ejemplo no se pisa nunca.
 CATALOG_PATH = os.path.join(os.path.dirname(__file__), "catalog.json")
+CATALOG_EJEMPLO = os.path.join(os.path.dirname(__file__), "catalog.example.json")
+
+
+def catalog_lectura() -> str:
+    """De donde LEER el catalogo: el propio si existe, el de ejemplo si no."""
+    return CATALOG_PATH if os.path.exists(CATALOG_PATH) else CATALOG_EJEMPLO
 
 # Cache de chunks cargados en memoria
 _chunks_cache = {}
@@ -42,7 +52,7 @@ def load_chunks(libro_id: str = None) -> list:
 
 
 def load_catalog():
-    with open(CATALOG_PATH, "r", encoding="utf-8") as f:
+    with open(catalog_lectura(), "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -187,7 +197,7 @@ if __name__ == "__main__":
     if not args:
         print("\nUso:")
         print('  python search.py "otitis media tratamiento"')
-        print('  python search.py "ECG normal" --libro farreras-2020')
+        print('  python search.py "ECG normal" --libro ejemplo-tratado-1')
         print('  python search.py "otalgia" --top 10')
         print('  python search.py "ergometria indicaciones" --verbose')
         sys.exit(0)

@@ -5,12 +5,25 @@
 __pycache__/
 *.pyc
 *.pyo
+.venv/
+venv/
 
 # Data (copyrighted book content — not open source)
+# Este repo es CODIGO. Lo que sigue es lo que entra por accidente cuando alguien prueba el pipeline
+# con sus propios documentos: el PDF que arrastro a la carpeta, lo que el parseo dejo al lado, y su
+# catalogo. Un `git add -A` distraido publica la biblioteca de otro.
 parsed/
 extracted/
+/data/
 data/processed/
 data/enriched/
+*.pdf
+# `examples/` es donde se deja el documento de prueba: se ignora el contenido y se versiona solo su
+# README, que explica que poner ahi.
+examples/*
+!examples/README.md
+# TU catalogo (la lista de tus documentos). El repo trae `catalog.example.json`; ver README.
+catalog.json
 
 # Runtime
 dedup_checkpoint.json

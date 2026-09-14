@@ -21,7 +21,17 @@ from db import run_query, run_write
 from pipeline.parseo import normalize_chunks, normalize_for_search  # noqa: F401
 
 PARSED_DIR = os.path.join(os.path.dirname(__file__), "parsed")
+# TU catalogo es `catalog.json` y NO viaja en el repo: es la lista de los documentos que vos
+# ingestaste. Si no existe se LEE `catalog.example.json` -dos entradas inventadas con la forma
+# esperada-, para que un clon recien hecho corra en vez de morir con un FileNotFoundError. Lo que
+# se ESCRIBE va siempre a `catalog.json`: el ejemplo no se pisa nunca.
 CATALOG_PATH = os.path.join(os.path.dirname(__file__), "catalog.json")
+CATALOG_EJEMPLO = os.path.join(os.path.dirname(__file__), "catalog.example.json")
+
+
+def catalog_lectura() -> str:
+    """De donde LEER el catalogo: el propio si existe, el de ejemplo si no."""
+    return CATALOG_PATH if os.path.exists(CATALOG_PATH) else CATALOG_EJEMPLO
 BATCH_SIZE = 100
 
 
@@ -259,7 +269,7 @@ def full_migration():
     print("  MIGRACIÓN COMPLETA v1 -> v2")
     print("=" * 60)
 
-    catalog = json.load(open(CATALOG_PATH, encoding="utf-8"))
+    catalog = json.load(open(catalog_lectura(), encoding="utf-8"))
 
     # Paso 1: Cargar todos los chunks v2
     all_children = []

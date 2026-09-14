@@ -40,11 +40,13 @@ RRF_K = 60
 # Embedding config
 
 # VERTEX AI, no API key (migrado 18-ago-2026).
-# Esta es la ruta de CONSULTA: cada busqueda semantica embebe el texto de la
-# pregunta. Cuando el saldo prepago de AI Studio llego a cero, el 429 se
-# convirtio en un 500 y tumbo /search/semantic, /search/hybrid y /query a la
-# vez — todos dependen de este vector. El /health seguia devolviendo 200,
-# porque no toca embeddings: el servicio parecia sano y no lo estaba.
+# ESTA ES LA RUTA DE CONSULTA: cada busqueda semantica embebe el texto de la pregunta, o sea que
+# depende de un proveedor externo EN CADA REQUEST. De ahi salen dos obligaciones de contrato:
+#   · el proveedor de embeddings es una dependencia dura de la busqueda semantica. Si deja de
+#     responder -cuota agotada, credenciales vencidas, region equivocada-, la busqueda no degrada:
+#     falla. Quien opere esto tiene que tratar esa cuota como parte del servicio.
+#   · un chequeo de vida que no embebe nada NO mide esta ruta. Una sonda que solo mira el proceso
+#     puede decir "sano" con la busqueda caida; si se quiere detectar, hay que sondear un embedding.
 #
 # OJO CON LA LOCATION: gemini-embedding-2 no existe en us-central1 (404).
 # Vive en `global`.
@@ -85,7 +87,7 @@ def search_semantic(query_text: str, top_k: int = 40, libro_id: str = None) -> l
         # no es del libro. Con $top_k chico eso devuelve casi siempre VACIO: si ninguno
         # de los 60 vecinos globales es de ese libro, el filtro deja 0.
         # Detectado 2026-07-30 al implementar el routing por fuente sugerida: la pasada
-        # restringida a meneghello no aportaba nada y solo trabajaba la pata keyword.
+        # restringida a una sola fuente no aportaba nada y solo trabajaba la pata keyword.
         # Fix: pedir un pool mucho mas grande antes de filtrar.
         pool = min(max(top_k * 60, 3000), 20000)
         results = query("""
@@ -146,8 +148,8 @@ def _terminos_lucene(texto: str) -> str:
       · `:` -> NO da error: Lucene lo lee como `campo:término`. "sindrome: condensacion pulmonar"
         se convierte en "buscá 'condensacion' en el campo 'sindrome'" -- campo que no existe, así
         que ese término se pierde y sólo queda "pulmonar". La búsqueda devuelve resultados
-        plausibles de los libros equivocados (Harrison/Farreras en vez de Argente) sin una sola
-        señal de que algo salió mal. Eso es peor que el error: mentira silenciosa.
+        plausibles de la fuente equivocada sin una sola señal de que algo salió mal. Eso es peor
+        que el error: mentira silenciosa.
 
     POR QUÉ REEMPLAZAR POR ESPACIO Y NO ESCAPAR CON `\\`: el índice usa el analizador
     `standard-no-stop-words`, cuyo tokenizer (UAX#29) ya descarta la puntuación AL INDEXAR -- los

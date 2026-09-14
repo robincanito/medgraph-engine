@@ -37,9 +37,16 @@ def normalize_for_search(text: str) -> str:
 
 
 def clean_text(text: str) -> str:
+    # ESTA ES UNA COPIA VIEJA, PRE-UNIFICACION: el parseo canonico vive en
+    # `pipeline/parseo.py` y esta `api/` no arranca hoy (ver README, "Not in this mirror
+    # yet"). Se delega el filtro de maqueta al canonico en vez de repetirlo aca: la regla
+    # que estaba en esta linea nombraba un sitio concreto, y una regla que nombra a alguien
+    # hay que editarla con cada documento nuevo. `parseo.clean_text` la reemplazo por un
+    # filtro de FORMA (aviso de derechos + encabezado/pie repetido), sin nombres propios.
+    from pipeline.parseo import clean_text as canonico
+    text = canonico(text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r'^\s*\d{1,4}\s*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'(?i)^.*booksmedicos\.org.*$', '', text, flags=re.MULTILINE)
     text = re.sub(r'[ \t]+', ' ', text)
     text = '\n'.join(line.strip() for line in text.split('\n'))
     return text.strip()

@@ -202,6 +202,26 @@ print(stats)   # {'embebidos': …, 'sin_vector': 0, 'lotes_fallidos': 0, 'llama
 is invisible to semantic search. The policy already retried and made a second pass; anything left
 is a provider outage or an exhausted quota, and it is reported instead of swallowed.
 
+### Your catalog
+
+The root scripts (`parser_v2.py`, `vectorize.py`, `search.py`, `upload_chunks.py`,
+`migrate_chunks.py`, `parser.py`) are driven by a **`catalog.json`** in the repo root: the list of
+documents you ingested, one entry per source, keyed by the `id` you use everywhere else
+(`libro_id`).
+
+That file is **yours and is not in this repo** — it would be a list of someone else's library. What
+ships is **`catalog.example.json`**, with two invented entries that show the shape. The scripts
+*read* `catalog.json` if it exists and fall back to the example if it does not, so a fresh clone
+runs instead of dying with a `FileNotFoundError`; they always *write* to `catalog.json`, so the
+example is never overwritten. Copy it and edit:
+
+```bash
+cp catalog.example.json catalog.json
+```
+
+`libro_id` must match `^[a-z0-9-]+$` (the `chunk/v1` contract, and what the ingest endpoint
+enforces).
+
 ### `quickstart.py`
 
 `python quickstart.py` runs the older end-to-end script (PDF in `examples/` → parse → upload →
@@ -378,6 +398,9 @@ for copyright infringement or unauthorized use of copyrighted material.
 ---
 
 ## Security notes
+
+**Found something exploitable? Do not open an issue.** Use GitHub's private vulnerability
+reporting — [`SECURITY.md`](SECURITY.md) has the channel, the scope, and what to expect.
 
 Out of the box this is a local-development setup. Before exposing anything publicly:
 

@@ -59,13 +59,15 @@ async def medgraph_comprehensive(tema: str) -> str:
 
 @mcp.tool()
 async def medgraph_search(query: str, top_k: int = 5, libro_id: str = "") -> str:
-    """Buscar en la bibliografia medica indexada. Busqueda hibrida (semantica + keywords).
+    """Buscar en la bibliografia indexada. Busqueda hibrida (semantica + keywords).
     Usar para preguntas puntuales como 'dosis de amoxicilina', 'valores normales de hemograma',
-    'definicion de fovea'. Libros disponibles: farreras-2020, harrison-manual, garcia-feijoo-oftalmo,
-    diamante-orl, balcells-laboratorio, goodman-gilman-farma, sanguinetti-semiologia,
-    and more. Configure your own books via the pipeline.
-    your indexed books appear here after running the pipeline.
-    
+    'definicion de fovea'.
+
+    `libro_id` es opcional y restringe la busqueda a UNA fuente. Los ids validos son los de TU
+    catalogo -el campo `id` de cada entrada de `catalog.json`, por ejemplo "<your-book-id>"-, o sea
+    los libros que vos hayas ingestado: no hay una lista fija que este servidor pueda prometer. Para
+    saber cuales hay, pedi el catalogo con el tool `medgraph_catalog` de la instancia, o mira tu
+    propio `catalog.json` (arranca desde `catalog.example.json`). Sin `libro_id` busca en todo.
     """
     body = {"query": query, "top_k": top_k}
     if libro_id:

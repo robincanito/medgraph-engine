@@ -1,6 +1,7 @@
 """MedGraph API — Knowledge base medica para estudio."""
 
 import os
+import secrets
 import time
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +14,18 @@ from services import graph
 
 load_dotenv()
 
+# FALLA CERRADA, Y ES LO QUE ARREGLA EL ITEM M-4 (13-sep-2026). `os.getenv("API_KEY", "")` dejaba
+# la API ABIERTA cuando la variable faltaba: sin header, `api_key` valia "" y el `!=` de abajo
+# comparaba "" contra "" y daba acceso a todo. Un olvido en el despliegue no puede ser "sin auth":
+# o hay clave o no hay servicio. Se aborta al IMPORTAR -no en el primer request- para que el fallo
+# sea del arranque, que es donde se mira.
 API_KEY = os.getenv("API_KEY", "")
+if not API_KEY:
+    raise RuntimeError(
+        "API_KEY no esta definida. La API no arranca sin clave: con la variable vacia "
+        "cualquier request sin credencial quedaba autorizado. Copia .env.example a .env y "
+        "poné un valor (o exportá API_KEY en el entorno del contenedor)."
+    )
 
 # Rate limiter
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
@@ -57,7 +69,11 @@ async def auth_middleware(request: Request, call_next):
         request.headers.get("X-API-Key")
         or request.headers.get("Authorization", "").replace("Bearer ", "")
     )
-    if api_key != API_KEY:
+    # `compare_digest` y no `==`: la comparacion normal corta en el primer byte que difiere, y ese
+    # tiempo filtra el secreto. Se comparan BYTES porque `compare_digest` de dos `str` revienta con
+    # un ValueError si alguno trae un caracter no ASCII, y el header lo escribe quien llama: eso
+    # convertiria una credencial mal tipeada en un 500.
+    if not (api_key and secrets.compare_digest(api_key.encode("utf-8"), API_KEY.encode("utf-8"))):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     return await call_next(request)

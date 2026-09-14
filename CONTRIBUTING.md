@@ -5,6 +5,8 @@ Thanks for your interest in contributing! Here's how you can help.
 ## Ways to Contribute
 
 - **Report bugs** — Open an issue describing the problem, steps to reproduce, and expected behavior
+  (a *security* bug is the exception: it goes through private vulnerability reporting, see
+  [`SECURITY.md`](SECURITY.md))
 - **Suggest features** — Open an issue with your idea and how it would improve the system
 - **Create DAGs** — Clinical reasoning flows for new medical topics (YAML format in `dags/`)
 - **Improve the parser** — Better structure detection for different book formats

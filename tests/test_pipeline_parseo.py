@@ -430,7 +430,8 @@ class TestUnaSolaFuenteDeVerdad:
                  "_celda_limpia", "_fusionar_continuaciones", "_parece_encabezado",
                  "render_tabla", "_tokens", "_pierde_contenido", "extraer_texto_pagina",
                  "classify_content_type", "_find_sentence_boundary", "generate_chunks_v2",
-                 "detect_structure", "parse_pdf_v2"}
+                 "detect_structure", "parse_pdf_v2",
+                 "_clave_de_linea", "lineas_repetidas", "quitar_lineas"}
 
     def _defs(self, rel):
         arbol = ast.parse((RAIZ / rel).read_text(encoding="utf-8"))
@@ -458,3 +459,167 @@ class TestUnaSolaFuenteDeVerdad:
         top = {a.name for n in arbol.body if isinstance(n, ast.Import) for a in n.names}
         assert "fitz" not in top, \
             "PyMuPDF se importa perezoso (10 s de arranque en frio, 1-sep-2026)"
+
+
+class TestLaMaquetaNoEsContenido:
+    """El encabezado/pie de pagina se va por su FORMA, no por el nombre de nadie.
+
+    LA CURA QUE ESTE TEST PROTEGE (13-sep-2026, items C-1/C-2 de la auditoria de exposicion).
+    `clean_text` borraba lineas con regex que nombraban al titular de los derechos de un libro y
+    al sitio del que habia salido un PDF. En un espejo publico eso no es limpieza: es un recibo de
+    la procedencia del corpus, y ademas obliga a editar el codigo por cada documento nuevo. Ahora
+    son dos reglas de forma:
+
+      · REPETICION -- `lineas_repetidas` mira el DOCUMENTO (no la pagina) y marca la linea que
+        aparece en el borde de >= MIN_PAGINAS_REPETIDAS paginas, corta en absoluto y corta contra
+        el ancho del cuerpo. `parse_pdf_v2` la aplica antes de `detect_structure`.
+      · AVISO DE DERECHOS -- `AVISO_DE_DERECHOS`: el simbolo con año, o la palabra con la que se
+        escribe un aviso. Sin un solo nombre propio.
+
+    Las tres condiciones de la primera regla salieron de falsos positivos MEDIDOS; los tests de
+    abajo son uno por condicion, y son lo que impide que el filtro se coma contenido.
+    El pie de los fixtures es inventado: un test que usara el pie real de un libro reintroduciria
+    en el repo justo lo que se saco. `tests/test_repo.py` lo verifica sobre todo el arbol.
+    """
+
+    PIE = "Editorial Ejemplo S.A. -- prohibida su reproduccion"
+    UNICA = "Nota del editor a esta primera tirada, que aparece una sola vez"
+
+    @classmethod
+    def _paginas(cls, n=6, con_pie=4, unica_en=1):
+        """`n` paginas de prosa; las primeras `con_pie` llevan el pie al final."""
+        out = []
+        for p in range(1, n + 1):
+            lineas = [f"Pagina {p}. " + " ".join(PARRAFO.split())]
+            if p == unica_en:
+                lineas.append(cls.UNICA)
+            if p <= con_pie:
+                lineas.append(cls.PIE)
+            out.append("\n".join(lineas))
+        return out
+
+    def test_el_pie_repetido_en_4_de_6_paginas_es_maqueta(self):
+        assert self.PIE in parseo.lineas_repetidas(self._paginas())
+
+    def test_la_linea_que_aparece_una_vez_se_conserva(self):
+        repetidas = parseo.lineas_repetidas(self._paginas())
+        assert self.UNICA not in repetidas
+        limpia = parseo.quitar_lineas(self._paginas()[0], repetidas)
+        assert self.UNICA in limpia and self.PIE not in limpia
+
+    def test_dos_paginas_no_alcanzan(self):
+        """MIN_PAGINAS_REPETIDAS = 3: con dos coincidencias todavia puede ser un parrafo."""
+        assert parseo.lineas_repetidas(self._paginas(con_pie=2)) == set()
+
+    def test_el_cuerpo_no_se_toca(self):
+        repetidas = parseo.lineas_repetidas(self._paginas())
+        for i, pagina in enumerate(self._paginas(), start=1):
+            limpia = parseo.quitar_lineas(pagina, repetidas)
+            assert f"Pagina {i}." in limpia and "insuficiencia cardiaca" in limpia
+
+    def test_una_linea_repetida_en_EL_MEDIO_no_es_maqueta(self):
+        """Condicion 1 (posicion): una frase que el libro repite en el CUERPO se queda. Un
+        encabezado o un pie, ademas de repetirse, esta siempre en el mismo lugar."""
+        estribillo = "Ante cualquier duda, consultar al especialista."
+        cuerpo = " ".join(PARRAFO.split())
+        paginas = [f"Titulo {p}\n{cuerpo}\n{estribillo}\n{cuerpo}\nfin de la pagina {p}"
+                   for p in range(1, 6)]
+        assert estribillo not in parseo.lineas_repetidas(paginas)
+
+    def test_un_parrafo_LARGO_repetido_en_el_borde_no_es_maqueta(self):
+        """Condicion 2 (largo absoluto): PyMuPDF no hace wrap, asi que un documento sintetico
+        puede tener el mismo parrafo entero como unica linea de cada pagina."""
+        largo = " ".join(PARRAFO.split())
+        assert len(largo) > parseo.MAX_CHARS_MAQUETA
+        assert parseo.lineas_repetidas([largo + "\n" + self.PIE for _ in range(5)]) == {self.PIE}
+
+    def test_una_linea_de_CUERPO_a_ancho_completo_no_es_maqueta(self):
+        """Condicion 3 (ancho relativo), y es el falso positivo mas fino: un texto armado con un
+        vocabulario que CICLA produce paginas periodicas, y la primera y la ultima linea de una
+        pagina salen identicas a las de otra. Son lineas de cuerpo justificadas -pasan el techo
+        absoluto- y aun asi no son maqueta: un pie no llena la caja de texto."""
+        vocabulario = ("caudal", "impulsor", "rodamiento", "sello", "brida", "aspiracion",
+                       "descarga", "cebado", "valvula", "tablero", "conexion", "carcasa")
+        palabras = [vocabulario[i % len(vocabulario)] for i in range(600)]
+        lineas = [" ".join(palabras[i:i + 10]) for i in range(0, len(palabras), 10)]
+        paginas = ["\n".join(lineas[i:i + 12]) for i in range(0, len(lineas), 12)]
+        assert len(paginas) >= 3 and max(len(l) for l in lineas) < parseo.MAX_CHARS_MAQUETA
+        assert parseo.lineas_repetidas(paginas) == set()
+
+    def test_la_repeticion_se_mide_con_los_espacios_normalizados(self):
+        """El mismo pie extraido de dos paginas difiere en un espacio doble: el espaciado lo pone
+        la maqueta, no el texto."""
+        cuerpo = " ".join(PARRAFO.split())
+        paginas = [f"{cuerpo} uno\n" + self.PIE,
+                   f"{cuerpo} dos\n" + self.PIE.replace(" -- ", "   --  "),
+                   f"{cuerpo} tres\n" + self.PIE + " "]
+        assert parseo.lineas_repetidas(paginas) == {self.PIE}
+
+    def test_el_aviso_de_derechos_se_va_por_su_forma(self):
+        """El simbolo con año o la palabra. El MISMO patron saca el aviso de una editorial
+        inventada y el de otra, sin conocer ninguna: es lo que hace que no haya que editar el
+        codigo cuando entra un libro nuevo. El simbolo se escribe con su escape para que el
+        guard de `tests/test_repo.py` no se tropiece con este archivo."""
+        for aviso in ("\u00a9 2024 Casa Editora", "(c) 2024 Casa Editora",
+                      "Todos los derechos reservados", "Copyright de la presente edicion",
+                      "Prohibido fotocopiar esta obra"):
+            assert parseo.clean_text(aviso) == "", aviso
+
+    def test_una_linea_de_cuerpo_larga_con_la_palabra_se_conserva(self):
+        """La palabra sola no alcanza: un aviso legal es una linea CORTA. Una linea de cuerpo que
+        use "derechos reservados" o "fotocopiar" -plausible en un tratado de derecho o en un
+        manual- es larga, y borrarla seria borrar contenido."""
+        cuerpo = ("Las provincias conservan todo el poder no delegado y los derechos reservados "
+                  "por pactos especiales al tiempo de su incorporacion, segun el articulo 121 "
+                  "de la Constitucion Nacional, que la doctrina lee como regla de reparto.")
+        assert len(cuerpo) > parseo.MAX_CHARS_MAQUETA
+        assert parseo.clean_text(cuerpo) == cuerpo
+        assert parseo.clean_text("Todos los derechos reservados. Prohibida su reproduccion.") == ""
+
+    def test_el_simbolo_solo_no_alcanza(self):
+        """Sin año ni palabra no es un aviso: el simbolo suelto aparece en notas al pie."""
+        assert parseo.clean_text("el signo \u00a9 se usa para marcar la obra") != ""
+
+    def test_el_texto_de_cuerpo_pasa_intacto(self):
+        assert parseo.clean_text(PARRAFO.strip()) == " ".join(PARRAFO.split())
+
+
+class TestElPdfConPieRepetido:
+    """El filtro de punta a punta, sobre un PDF de verdad y no sobre strings."""
+
+    PIE = TestLaMaquetaNoEsContenido.PIE
+
+    @pytest.fixture
+    def pdf_con_pie(self, tmp_path):
+        fitz = pytest.importorskip("fitz")
+        doc = fitz.open()
+        for p in range(1, 7):
+            pagina = doc.new_page()
+            pagina.insert_text((72, 72), f"Capitulo {p}\n" + PARRAFO * 6, fontsize=9)
+            if p <= 4:                     # el pie, en 4 de las 6 paginas
+                pagina.insert_text((72, 800), self.PIE, fontsize=8)
+            if p == 5:                     # una linea de UNA pagina, en el mismo lugar
+                pagina.insert_text((72, 800), "Errata de la pagina cinco", fontsize=8)
+        ruta = tmp_path / "con_pie.pdf"
+        doc.save(ruta)
+        doc.close()
+        return str(ruta)
+
+    def test_el_pie_no_llega_a_ningun_chunk(self, pdf_con_pie):
+        hijos, padres = parseo.parse_pdf_v2(pdf_con_pie, "libro-con-pie")
+        assert hijos and padres
+        assert not any("Editorial Ejemplo" in c["text"] for c in hijos)
+        assert not any("Editorial Ejemplo" in p["text"] for p in padres)
+
+    def test_el_cuerpo_y_la_linea_unica_sobreviven(self, pdf_con_pie):
+        hijos, _ = parseo.parse_pdf_v2(pdf_con_pie, "libro-con-pie")
+        todo = " ".join(c["text"] for c in hijos)
+        assert "insuficiencia cardiaca" in todo
+        assert "Errata de la pagina cinco" in todo
+        assert hijos[0]["page_start"] == 1 and hijos[-1]["page_end"] == 6
+
+    def test_el_pie_no_se_hace_pasar_por_titulo(self, pdf_con_pie):
+        """Por eso la pasada corre ANTES de `detect_structure`."""
+        hijos, _ = parseo.parse_pdf_v2(pdf_con_pie, "libro-con-pie")
+        titulos = {c["titulo_capitulo"] for c in hijos} | {c["titulo_seccion"] for c in hijos}
+        assert not any("Editorial" in t for t in titulos), titulos

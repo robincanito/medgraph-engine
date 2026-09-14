@@ -4,7 +4,7 @@
 # constantes TARGET_SIZE..MAX_PARENT_WORDS), no se retipearon: retipear un regex con acentos y
 # backslashes es como se pierde un acento sin que nadie lo vea.
 #
-# POR QUE EXISTE ESTE ARCHIVO (decision de Ivan, 13-sep-2026; §8 punto 6 de
+# POR QUE EXISTE ESTE ARCHIVO (decision del owner del corpus, 13-sep-2026; §8 punto 6 de
 # docs/DISENO-qa-pipeline-13sep.md). Hasta hoy un documento que no era de medicina ni de derecho
 # se procesaba "sin perfil", y sin perfil rige el default del codigo, que es EL DE MEDICINA: 280
 # palabras por chunk, solape 60, y los patrones de capitulo de un tratado. Funcionaba, pero por
@@ -19,7 +19,7 @@ version: 1
 language: es
 
 graph:
-  target: medgraph            # resuelve a secret neo4j-uri
+  target: medgraph            # nombre lógico del grafo; la resolución es de la infraestructura
   name_property: name         # dominios nuevos usan `name`; medicina arrastra `nombre` por legado
 
 # TAXONOMIA MINIMA Y DOMAIN-NEUTRAL, a proposito. Tres tipos de entidad y dos de relacion que

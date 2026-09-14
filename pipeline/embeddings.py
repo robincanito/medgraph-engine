@@ -21,7 +21,7 @@ politica de vectorizacion: `ingest.py::step_vectorize` reintentaba 3 veces con e
 truncaba a 2.000 caracteres, y `api/services/ingest.py::vectorize_chunks` no reintentaba nada,
 dormia 3 s y no truncaba. El MISMO documento terminaba con distinto numero de embeddings segun
 por donde entro (agujero G3 del diseno). `vectorizar_faltantes` es la unica politica: la del CLI,
-que es la que Ivan aprobo, mas el conteo explicito de los chunks que quedaron SIN vector, que
+que es la que aprobo el owner del corpus, mas el conteo explicito de los chunks que quedaron SIN vector, que
 antes nadie reportaba.
 """
 import logging

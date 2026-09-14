@@ -10,7 +10,7 @@ medicina:
   - los tamaños de chunk (280 palabras, solape 60, padres de 3) eran constantes de modulo.
 
 Y 280 palabras esta bien para prosa medica y MAL para una norma, donde el articulo ES la unidad
-y partirlo destruye la cita (decision de Ivan, 4-ago-2026). Un pipeline que sirve a varios
+y partirlo destruye la cita (decision del owner del corpus, 4-ago-2026). Un pipeline que sirve a varios
 dominios no puede tener esos numeros escritos en el codigo.
 
 QUE HACE. `Estrategia` junta esos parametros en un objeto que viaja por el pipeline. El default

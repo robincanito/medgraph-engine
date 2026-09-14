@@ -5,7 +5,7 @@ version: 1
 language: es
 
 graph:
-  target: medgraph            # resuelve a secret neo4j-uri
+  target: medgraph            # nombre lógico del grafo; la resolución es de la infraestructura
   name_property: nombre       # legado — dominios nuevos usan `name`
 
 entities:

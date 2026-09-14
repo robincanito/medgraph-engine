@@ -1,0 +1,39 @@
+{
+  "_readme": "Catalogo de EJEMPLO con dos fuentes inventadas. Copialo a catalog.json y poné tus propios documentos: los scripts usan catalog.json si existe y este archivo si no. Ningun dato de acá es real.",
+  "libros": [
+    {
+      "id": "ejemplo-tratado-1",
+      "archivo": "Tratado de Ejemplo.pdf",
+      "titulo": "Tratado de Ejemplo",
+      "autor": "Autora De Ejemplo, A.",
+      "edicion": "1°",
+      "paginas": 1240,
+      "tipo_pdf": "digital",
+      "estado": "parseado",
+      "fecha_parseo": null,
+      "chunks_generados": 1310,
+      "chunks_v2": 3980,
+      "parents_v2": 1327,
+      "fecha_parseo_v2": null
+    },
+    {
+      "id": "ejemplo-manual-2",
+      "archivo": "Manual de Ejemplo (segunda edicion).pdf",
+      "titulo": "Manual de Ejemplo",
+      "autor": "Autor De Ejemplo, B.; Otra Autora, C.",
+      "edicion": "2°",
+      "paginas": 312,
+      "tipo_pdf": "digital",
+      "estado": "parseado",
+      "fecha_parseo": null,
+      "chunks_generados": 340,
+      "chunks_v2": 902,
+      "parents_v2": 301,
+      "fecha_parseo_v2": null
+    }
+  ],
+  "course_materials": {
+    "estado": "sin_procesar",
+    "nota": "Entrada de ejemplo. Configurá tu propio material."
+  }
+}

@@ -82,6 +82,54 @@ INICIO_MAX_REFERENCIAS = 0.25
 CODIGO_CLASIFICACION = re.compile(r"\b[A-Z]\d{2}\.\d{1,2}\b")
 MIN_CODIGOS_INDICE = 8
 
+# LA MAQUETA NO ES CONTENIDO (13-sep-2026, items C-1/C-2 de la auditoria de exposicion). El
+# encabezado y el pie de pagina se cuelan en CADA chunk: suman terminos al indice full-text, entran
+# al texto que se embebe y no dicen nada del tema. Se los reconoce por la FORMA -repeticion y aviso
+# legal-, nunca por el nombre del titular ni del sitio de donde salio un PDF: una regla que nombra a
+# alguien hay que cambiarla con cada libro nuevo, y en un espejo publico cuenta de donde vino el
+# corpus. Ver `clean_text` y `lineas_repetidas`.
+#
+# TRES paginas, y el numero es el minimo que distingue: con 2 alcanza una coincidencia entre dos
+# paginas seguidas -frecuente en una tabla partida o en dos parrafos que arrancan igual-; con 3 la
+# coincidencia ya es un patron de la maqueta. Los documentos de menos de 3 paginas quedan sin filtro
+# de repeticion a proposito: ahi no hay evidencia de repeticion que valga.
+MIN_PAGINAS_REPETIDAS = 3
+# Cuantas lineas no vacias del principio y del final de cada pagina se consideran "borde". DOS, no
+# una: un pie suele traer el titulo corrido y el pie de imprenta en dos lineas, y un encabezado, el
+# nombre de la obra y el del capitulo. Mas que dos empieza a morder el primer parrafo.
+LINEAS_DE_BORDE = 2
+# Mas largo que esto no es un encabezado ni un pie: es un PARRAFO que se repite, y borrar un parrafo
+# es borrar contenido. El techo se pago con una medicion (13-sep-2026): los PDF sinteticos de la QA
+# meten el mismo cuerpo en cada pagina en UNA linea larguisima -PyMuPDF no hace wrap-, asi que sin
+# el techo esa linea quedaba "repetida en el borde de 6 paginas" y el filtro se comia el cuerpo
+# entero del documento. Un encabezado real -titulo de obra, titulo corrido, pie de imprenta- entra
+# de sobra en 120 caracteres.
+MAX_CHARS_MAQUETA = 120
+# Y ADEMAS TIENE QUE SER MAS CORTA QUE EL CUERPO. Esta es la condicion que de verdad distingue, y la
+# pago el escenario P10 del banco de QA (13-sep-2026): su PDF es un parrafo de 3.000 palabras tomadas
+# de un vocabulario de 15 que CICLA, asi que reportlab produce paginas periodicas y la primera y la
+# ultima linea de la pagina 1 son identicas a las de la 3 y la 5 -medido: 4 lineas de 90 a 99
+# caracteres repetidas en 3 paginas-. Son lineas de CUERPO justificadas al ancho de la caja: el
+# filtro se comia dos por pagina y el documento pasaba de 13 chunks a 4. Un encabezado o un pie, en
+# cambio, NUNCA llena la caja: es una linea corta suelta arriba o abajo. Se compara contra la linea
+# mas larga del documento -no contra la mediana, que se hunde en un documento de listas- y el 0,75
+# deja pasar un titulo corrido largo (70 de 110) y frena una linea de cuerpo (90 de 99).
+FRACCION_ANCHO_MAQUETA = 0.75
+# Un aviso de derechos POR SU FORMA: el simbolo (© o "(c)") seguido de año, o una de las palabras
+# con las que se escribe un aviso. Sin un solo nombre propio: no nombra editorial, autor ni sitio,
+# asi que sirve igual para cualquier libro y no hay que editar el codigo cuando entra uno nuevo.
+# El simbolo SOLO no alcanza -"©" suelto aparece en simbolos de unidades y en notas al pie-: lo que
+# convierte a la linea en un aviso es el año o la palabra.
+# Y LA LINEA TIENE QUE SER CORTA (el mismo techo que la maqueta, `MAX_CHARS_MAQUETA`): un aviso
+# legal es una linea suelta del pie de imprenta. Una linea de CUERPO que use la palabra -un tratado
+# de derecho hablando de "los derechos reservados a las provincias", un manual que diga "no
+# fotocopiar la receta"- es una linea justificada al ancho de la caja, y se conserva. Sin el techo,
+# la palabra sola borraba contenido en el dominio derecho.
+AVISO_DE_DERECHOS = re.compile(
+    r'(?i)^(?=.{1,' + str(MAX_CHARS_MAQUETA) + r'}$).*'
+    r'(?:(?:©|\(c\))\s*\d{4}|copyright|derechos\s+reservados|fotocopiar).*$',
+    re.MULTILINE)
+
 MIN_FILAS_TABLA = 2
 MIN_COLS_TABLA = 2
 SOLAPE_BLOQUE_TABLA = 0.5          # fraccion del bloque que debe caer dentro de la tabla
@@ -97,16 +145,107 @@ def normalize_for_search(text: str) -> str:
 
 
 def clean_text(text: str) -> str:
-    """Limpia texto extraído de PDF."""
+    """Limpia texto extraído de PDF: lo que es MAQUETA y no contenido.
+
+    EL FILTRO ES DE FORMA, NO DE TITULAR (13-sep-2026, items C-1/C-2 de la auditoría de
+    exposición). Hasta hoy esta función borraba líneas por una lista de regex que NOMBRABAN a
+    un editor concreto y al sitio del que había salido un PDF; eso viajaba al espejo OSS, que
+    es público, y decía de dónde venía el corpus de esta instancia. Lo que se quería sacar no
+    era "las líneas de tal editorial": era el pie de imprenta, que es de la maqueta y se cuela
+    en cada chunk. Así que ahora se reconoce por su FORMA, y la forma es doble:
+
+      · REPETICIÓN — el encabezado/pie se repite idéntico en muchas páginas. Eso no se puede
+        ver desde acá: esta función recibe UNA página sin contexto del documento. Lo hace
+        `lineas_repetidas` + `quitar_lineas`, que `parse_pdf_v2` aplica en una pasada previa.
+      · AVISO DE DERECHOS — `AVISO_DE_DERECHOS`, abajo: el símbolo con año, o la palabra con la
+        que se escribe un aviso. Sin un solo nombre propio, así que vale para cualquier libro
+        de cualquier editorial y no hay que tocar el código cuando entra un libro nuevo.
+
+    La línea de número de página suelto y la del encabezado de tratado ("… medicina interna …
+    edición …") quedan como estaban: son las de siempre y sacarlas cambiaría el parseo sobre
+    texto que no es un encabezado repetido, que es justo lo que esta tanda no toca.
+    """
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r'^\s*\d{1,4}\s*$', '', text, flags=re.MULTILINE)
     text = re.sub(r'(?i)^.*medicina interna.*edici[oó]n.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'(?i)^.*booksmedicos\.org.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'(?i)^.*© Elsevier\. Fotocopiar sin autorización es un delito\..*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'(?i)^.*© \d{4}.*Elsevier.*$', '', text, flags=re.MULTILINE)
+    text = AVISO_DE_DERECHOS.sub('', text)
     text = re.sub(r'[ \t]+', ' ', text)
     text = '\n'.join(line.strip() for line in text.split('\n'))
     return text.strip()
+
+
+def _clave_de_linea(linea: str) -> str:
+    """La forma comparable de una línea: espacios normalizados y sin bordes.
+
+    "Idénticas" se decide sobre ESTO y no sobre los bytes: el mismo pie extraído de dos
+    páginas distintas suele diferir en un espacio doble o en un espacio fino, porque el
+    espaciado lo pone la maqueta y no el texto.
+    """
+    return re.sub(r'\s+', ' ', linea).strip()
+
+
+def lineas_repetidas(paginas: list, minimo: int = MIN_PAGINAS_REPETIDAS,
+                     borde: int = LINEAS_DE_BORDE) -> set:
+    """Las líneas de encabezado/pie que se repiten en >= `minimo` páginas del documento.
+
+    Args:
+        paginas: textos de página YA limpiados con `clean_text`, en orden.
+        minimo: en cuántas páginas tiene que aparecer una línea para tratarla como maqueta.
+        borde: cuántas líneas no vacías de arriba y de abajo de cada página se miran.
+
+    Returns:
+        Conjunto de claves (`_clave_de_linea`) a descartar. Vacío si no hay ninguna.
+
+    ES PURA: recibe texto, devuelve un conjunto. No abre el PDF, no toca disco y no depende
+    del libro, del dominio ni del perfil — por eso se puede testear sin PyMuPDF.
+
+    POR QUÉ SÓLO EL BORDE Y NO TODA LA PÁGINA. "Línea repetida en N páginas" también describe
+    a una frase de cuerpo que un libro repite (una advertencia al pie de cada tabla, un
+    estribillo de un manual), y borrarla sería borrar contenido. Un encabezado o un pie, además
+    de repetirse, está SIEMPRE en el mismo lugar: arriba o abajo. Mirar sólo las `borde`
+    primeras y últimas líneas no vacías de cada página es lo que separa una cosa de la otra con
+    el orden de lectura, que es lo único que este módulo ve del PDF.
+
+    Y ADEMÁS TIENE QUE SER CORTA: corta en absoluto (`MAX_CHARS_MAQUETA`) y corta RELATIVO al
+    ancho del cuerpo (`FRACCION_ANCHO_MAQUETA` de la línea más larga del documento). Las dos
+    condiciones salieron de dos falsos positivos medidos el 13-sep-2026 y están anotadas arriba:
+    el documento cuyo cuerpo entero es una sola línea repetida, y el párrafo periódico de P10,
+    cuyas líneas de cuerpo justificadas se repiten entre páginas. Un pie de imprenta no llena la
+    caja de texto; una línea de cuerpo sí.
+
+    LO QUE ESTE FILTRO NO ATRAPA, dicho para que nadie lo descubra de nuevo: el pie que lleva el
+    número de página EN LA MISMA LÍNEA ("Cap. 3 — Editorial X — 45") no es idéntico entre
+    páginas y sobrevive. La línea de número suelto sí la saca `clean_text`, que es el caso
+    frecuente en los PDF del corpus. Normalizar dígitos acá haría colapsar filas de tablas.
+    """
+    por_pagina = []
+    ancho = 0
+    for texto in paginas:
+        lineas = [x for x in (_clave_de_linea(l) for l in texto.split('\n')) if x]
+        if not lineas:
+            continue
+        por_pagina.append(lineas)
+        ancho = max(ancho, max(len(x) for x in lineas))
+
+    techo = min(MAX_CHARS_MAQUETA, int(ancho * FRACCION_ANCHO_MAQUETA))
+    cuenta = Counter()
+    for lineas in por_pagina:
+        # `set`: en una página de menos de 2*borde líneas las zonas se solapan, y una línea no
+        # puede contar dos veces por la misma página.
+        zona = set(lineas[:borde] + lineas[-borde:])
+        cuenta.update(x for x in zona if len(x) <= techo)
+    return {clave for clave, n in cuenta.items() if n >= minimo}
+
+
+def quitar_lineas(texto: str, descartar: set) -> str:
+    """Saca del texto las líneas cuya forma normalizada esté en `descartar`.
+
+    Las líneas vacías se conservan: `lineas_repetidas` nunca las devuelve (no son maqueta) y
+    los saltos separan párrafos, que es lo que `detect_structure` lee.
+    """
+    if not descartar:
+        return texto
+    return '\n'.join(l for l in texto.split('\n') if _clave_de_linea(l) not in descartar)
 
 
 def _area(r) -> float:
@@ -697,6 +836,16 @@ def parse_pdf_v2(pdf_path: str, libro_id: str, estrategia: Estrategia = POR_DEFE
 
     doc.close()
     log.info(f"  {len(pages)} páginas con texto extraído")
+
+    # SEGUNDA PASADA: el encabezado/pie repetido. Necesita el documento COMPLETO —una línea es
+    # maqueta porque aparece en varias páginas, y eso no se ve mirando una sola—, así que no puede
+    # vivir en `clean_text`, que corre por página. Va ANTES de `detect_structure` para que el pie no
+    # pueda hacerse pasar por un título, y antes del chunker para que no entre a ningún chunk.
+    descartar = lineas_repetidas([p["text"] for p in pages])
+    if descartar:
+        log.info(f"  {len(descartar)} línea(s) de encabezado/pie repetido descartadas")
+        for p in pages:
+            p["text"] = quitar_lineas(p["text"], descartar)
 
     # Detectar estructura
     structured = detect_structure(pages, libro_id, estrategia)
