@@ -77,14 +77,20 @@ extraction:
   model: gemini-3.1-flash-lite
   batch_size: 3
   min_words: 100
+  max_chars_fragmento: 2500
   prompt_template: prompts/generico.md
-  rules: |
+  rules: |-        # ver la nota de medicina: `|` meteria un renglon vacio en el prompt
     - Nombres canonicos en español, en minuscula y en singular.
     - Extraer solo entidades que el texto NOMBRA; no inferir las que estan implicitas.
     - No extraer cifras, fechas, codigos de norma ni unidades como entidades.
     - Las relaciones deben conectar entidades presentes en el MISMO fragmento; NO inventar.
     - Ante la duda sobre el tipo, usar `concepto`: es preferible un tipo laxo a uno inventado.
 
+# Los mismos valores de medicina, por la misma razon que el resto de este perfil: el generico
+# DECLARA el default historico en vez de heredarlo por omision.
 canonicalization:
   merge_synonyms: true
   min_name_length: 2
+  max_name_length: 100
+  fold_accents: false
+  max_menciones: 10

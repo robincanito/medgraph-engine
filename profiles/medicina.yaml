@@ -1,7 +1,22 @@
 # Perfil de dominio: bibliografía médica (MedGraph)
 # Fuente: taxonomía en producción de extract_entities.py (2026-07, 159K+ entidades)
+#
+# VERSION 2 (14-sep-2026, decisión E: la taxonomía de extracción sale del perfil). Hasta v1 este
+# archivo era DOCUMENTACION: la taxonomía que de verdad regía estaba escrita a mano en
+# `extract_entities.py` y `extract_entities_fast.py`, y ninguna línea de código leía `entities`,
+# `relations`, `extraction.*` ni `canonicalization.*`. Desde v2 el prompt se RENDERIZA desde acá
+# (`prompts/medicina.md` + `extraction.rules`), el validador usa estos tipos y el canonicalizador
+# lee `canonicalization.*`.
+#
+# QUE NO CAMBIA, Y ES EL PUNTO: v2 renderiza EL MISMO PROMPT que el código en v1, byte a byte. Las
+# `extraction.rules` de abajo se VOLCARON del bloque REGLAS de `extract_entities_fast.BATCH_PROMPT`
+# (corte y pegado programático, no retipeadas: un acento retipeado no sobrevive), y un test lo fija
+# contra un golden congelado antes del cambio
+# (`medgraph/tests/golden/extraccion/prompt_medicina_v1.txt`). O sea que el corpus de 159K entidades
+# extraído con v1 SIGUE SIENDO COMPARABLE con lo que se extraiga con v2. El bump de versión no dice
+# "cambió el criterio": dice "ahora el criterio está acá y no en el código".
 profile: medicina
-version: 1
+version: 2
 language: es
 
 graph:
@@ -101,6 +116,33 @@ relations:
     from: [patologia]
     to: [patologia]
 
+  # LAS CUATRO HUERFANAS (14-sep-2026, decisión 2 de §8 del diseño de extracción por perfil).
+  # `extract_entities.RELATION_TYPES` las acepta desde la etapa de anatomía, el prompt nunca las
+  # pidió y el perfil no las publicaba: el grafo PUEDE tenerlas y el descriptor de admin/v1 no las
+  # listaba, así que un cliente que confiara en `relation_types` para dibujar el grafo perdía
+  # aristas sin enterarse.
+  #
+  # `extraer: false` = la relación es VALIDA para el grafo y se publica en el descriptor, pero NO
+  # entra al prompt renderizado. Por eso agregarlas acá no cambia una coma de lo que el modelo
+  # produce. La alternativa —borrarlas del set aceptado— deja el grafo con aristas que el contrato
+  # niega, que es peor.
+  - id: IRRIGA
+    from: [estructura_anatomica]
+    to: [estructura_anatomica]
+    extraer: false
+  - id: INERVA
+    from: [estructura_anatomica]
+    to: [estructura_anatomica]
+    extraer: false
+  - id: DRENA_EN
+    from: [estructura_anatomica]
+    to: [estructura_anatomica]
+    extraer: false
+  - id: SE_ORIGINA_EN
+    from: [estructura_anatomica]
+    to: [estructura_anatomica]
+    extraer: false
+
 # Como se PARSEA y se CHUNKEA este material (9-sep-2026, ver pipeline/estrategia.py). Vivia en
 # el codigo del parser, o sea que "Farreras numera sus capitulos asi" era un commit y no un dato
 # del dominio. Todo lo de aca abajo es opcional: sin estas secciones rige el default historico.
@@ -156,14 +198,39 @@ extraction:
   model: gemini-3.1-flash-lite
   batch_size: 3
   min_words: 100
+  # Caracteres de cada fragmento que viajan al prompt (`chunk['text'][:2500]`). Era un literal
+  # en `extract_entities_fast.extract_batch`. OJO, dos convenciones distintas para la misma
+  # metadata y las dos en producción: el prefijo de EMBEDDING lleva tildes ("Capítulo: …") y el
+  # contexto de EXTRACCION no ("Capitulo: …"). Ninguna está equivocada; este perfil conserva las
+  # dos para que la próxima persona no "arregle" una de ellas.
+  max_chars_fragmento: 2500
   prompt_template: prompts/medicina.md
-  rules: |
-    - Nombres canónicos SIEMPRE en español, sin importar el idioma del texto:
-      "heart failure" → "insuficiencia cardíaca", "furosemide" → "furosemida".
-    - Incluir sinónimos y abreviaturas comunes (español e inglés): "OMA", "IC", "EPOC".
-    - Solo entidades médicas concretas — no conceptos vagos ("el paciente", "la enfermedad").
-    - Las relaciones deben conectar entidades presentes en el texto; NO inventar.
+  # VERBATIM del bloque REGLAS de `extract_entities_fast.BATCH_PROMPT` (v1), volcado con un
+  # script. El valor de v1 era una PARAFRASIS escrita al crear el perfil que ningún modelo vio
+  # nunca: renderizarla habría cambiado el prompt en la primera corrida. El `|-` (y no `|`) es
+  # parte del trato: la plantilla pone `{rules}` seguido de un renglón en blanco, así que un
+  # salto de línea de más acá cambia el prompt.
+  rules: |-
+    - Extrae SOLO entidades medicas concretas (no conceptos vagos)
+    - SIEMPRE usa nombres canonicos en ESPAÑOL, sin importar el idioma del texto.
+      Si el texto está en inglés, traduce: "heart failure" → "insuficiencia cardíaca",
+      "furosemide" → "furosemida", "hypercalcemia" → "hipercalcemia", etc.
+    - Incluye sinonimos y abreviaturas comunes (en español e inglés)
+    - Las relaciones deben conectar entidades que aparecen en el texto
+    - NO inventes relaciones que no esten en el texto
 
+# Los cuatro valores nuevos (14-sep-2026) DECLARAN LA CONDUCTA DE HOY, no la cambian:
+#   · max_name_length 100  — era un literal `len(nombre) > 100` en `_validate_extraction`.
+#   · fold_accents false   — `normalize_name` NO saca acentos, pese a lo que dice su docstring;
+#     "insuficiencia cardiaca" y "insuficiencia cardíaca" son DOS entidades y la única red que
+#     hoy las junta son los sinónimos del modelo. Encenderlo cambia nombres canónicos del grafo,
+#     o sea es una migración (`dedup_entities.py`), no un cambio de YAML.
+#   · max_menciones 10     — era el `[:10]` de `upload_entities`. Desde hoy son los diez PRIMEROS
+#     por posición en el documento: `chunk_ids` era un `set` y cuáles diez quedaban ligados
+#     dependía del hash del proceso (dos corridas idénticas daban grafos distintos).
 canonicalization:
   merge_synonyms: true
   min_name_length: 2
+  max_name_length: 100
+  fold_accents: false
+  max_menciones: 10

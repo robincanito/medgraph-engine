@@ -53,3 +53,30 @@ def estrategia(dominio: str = POR_DEFECTO):
     from pipeline.estrategia import desde_perfil
 
     return desde_perfil(cargar(dominio))
+
+
+def plantilla_de(dominio: str = POR_DEFECTO) -> Path:
+    """La ruta de la plantilla de prompt de un dominio.
+
+    `extraction.prompt_template` se resuelve RELATIVO AL DIRECTORIO DEL PERFIL — hasta el
+    14-sep-2026 era un path relativo a nada y el directorio `prompts/` no existia en ninguno
+    de los tres repos. Esta funcion es el unico lugar que sabe esa regla.
+    """
+    referencia = (cargar(dominio).get("extraction") or {}).get("prompt_template")
+    if not referencia:
+        raise ValueError(f"el perfil '{dominio}' no declara extraction.prompt_template")
+    return ruta_de(dominio).parent / referencia
+
+
+@lru_cache(maxsize=4)
+def taxonomia(dominio: str = POR_DEFECTO):
+    """La taxonomia de extraccion que declara el perfil de un dominio: tipos, relaciones,
+    prompt, reglas y canonicalizacion. Es lo que `armar_prompt`/`validar`/`canonicalizar`/
+    `cargar` consumen, y desde el 14-sep-2026 la UNICA fuente de esa verdad.
+
+    Se cachea como `cargar`: construirla lee un YAML y un .md, y el prompt se arma una vez por
+    lote. `taxonomia.cache_clear()` en un test que cambia el perfil en disco.
+    """
+    from pipeline.extraccion import taxonomia as construir
+
+    return construir(cargar(dominio), ruta=ruta_de(dominio))

@@ -29,6 +29,14 @@ un campo sin actualizar los oraculos que lo leen.
                 paso in {classify, extract}; estado in {ok, error}. `libro_id` puede ser
                 None: el clasificador corre antes de que el libro exista.
 
+  extraccion_descarte   libro_id, chunk_id, motivo, tipo?, relacion?, desde_tipo?, hasta_tipo?
+                motivo in {tipo_entidad, tipo_relacion, nombre_corto, nombre_largo, from_to,
+                extremo_ausente}. UNO POR ITEM DESCARTADO (14-sep-2026, decision E). Hasta hoy
+                lo que el validador tiraba se perdia en silencio y nadie podia medir la
+                diferencia entre lo que el modelo devolvio y lo que quedo en el grafo.
+                `from_to` y `extremo_ausente` se emiten SIN rechazar: son la evidencia con la
+                que se decide si el rechazo estricto se enciende (ver extraccion.py).
+
 Las claves del sobre JSON (severity, message, logger, time, evento, exception) estan PROHIBIDAS
 como nombre de campo: el formateador aplana los campos al nivel raiz y una colision pisaria el
 sobre en silencio. `emitir` levanta ValueError antes de que eso pase.

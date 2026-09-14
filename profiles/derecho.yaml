@@ -1,0 +1,122 @@
+# Perfil de dominio: derecho argentino (LexGraph)
+# Fuente: taxonomía en producción de legal_extractor.py (2026-07)
+profile: derecho
+version: 1
+language: es
+
+graph:
+  target: lexgraph            # resuelve a secret lexgraph-neo4j-uri
+  name_property: name
+
+entities:
+  - id: law
+    label: Law
+    desc: "leyes, códigos, decretos, resoluciones: ley 25.065, CCyC, DNU 70/2023, ley 24.240"
+  - id: article
+    label: Article
+    desc: "artículos de una norma, con su norma: articulo 14 ley 25.065, articulo 770 ccyc"
+  - id: legal_concept
+    label: LegalConcept
+    desc: "conceptos jurídicos: intereses punitorios, nulidad, consumidor, buena fe, mora"
+  - id: jurisprudence
+    label: Jurisprudence
+    desc: "fallos y precedentes: 'Halabi', plenario 'Uzal', CSJN Fallos 330:563"
+  - id: institution
+    label: Institution
+    desc: "órganos e instituciones: CSJN, BCRA, AFIP, Congreso de la Nación"
+  - id: legal_procedure
+    label: LegalProcedure
+    desc: "procesos y actos procesales: amparo, pericia contable, impugnación, recurso extraordinario"
+  - id: legal_principle
+    label: LegalPrinciple
+    desc: "principios del derecho: in dubio pro consumidor, pacta sunt servanda, congruencia"
+  - id: doctrine
+    label: Doctrine
+    desc: "doctrina y autores citados como fuente interpretativa"
+
+relations:
+  - id: REGULADO_POR
+    from: [legal_concept, legal_procedure]
+    to: [law, article]
+  - id: PARTE_DE
+    from: [article]
+    to: [law]
+  - id: DEFINE
+    from: [article, law]
+    to: [legal_concept]
+  - id: INTERPRETA
+    from: [jurisprudence, doctrine]
+    to: [law, article, legal_concept]
+  - id: MODIFICA
+    from: [law]
+    to: [law, article]
+  - id: DEROGA
+    from: [law]
+    to: [law, article]
+  - id: REMITE_A
+    from: [article]
+    to: [article, law]
+  - id: FUNDAMENTA
+    from: [legal_principle]
+    to: [legal_concept, jurisprudence]
+  - id: REQUISITO_DE          # draft — validar contra grafo real
+    from: [legal_concept]
+    to: [legal_concept, legal_procedure]
+  - id: EXCEPCION_A           # draft — validar contra grafo real
+    from: [legal_concept]
+    to: [legal_concept]
+  - id: APLICA
+    from: [jurisprudence, institution]
+    to: [legal_principle, legal_concept]
+
+# Como se PARSEA y se CHUNKEA una norma (9-sep-2026, ver pipeline/estrategia.py).
+# ACA SE VE POR QUE EL PERFIL MANDA: con los numeros de medicina (280 palabras, solape 60) un
+# articulo se parte al medio y la cita deja de ser citable. En derecho la unidad de sentido es
+# el articulo, no el parrafo (decision de Ivan, 4-ago-2026).
+parse:
+  structure_patterns:
+    capitulo:
+    - ^LIBRO\s+[IVXLCDM]+
+    - ^T[IÍ]TULO\s+[IVXLCDM]+
+    - ^CAP[IÍ]TULO\s+[IVXLCDM\d]+
+    seccion:
+    - ^ARTICULO\s+\d+
+    - ^ART[IÍ]CULO\s+\d+
+    - ^Art\.\s*\d+
+
+chunk:
+  target_size: 700          # un articulo entero entra; los largos se parten por sus incisos
+  min_size: 200
+  max_size: 1400
+  overlap: 0                # solapar dos articulos mezcla dos normas en un mismo pasaje
+  parent_window: 1          # el padre es el articulo, no una ventana de vecinos
+  max_parent_words: 4000
+
+extraction:
+  model: gemini-3.1-flash-lite
+  batch_size: 3
+  min_words: 100
+  max_chars_fragmento: 2500
+  prompt_template: prompts/derecho.md
+  # `|-` como en medicina: la plantilla pone `{rules}` seguido de un renglón en blanco, así que
+  # un salto de línea de más acá mete un renglón vacío en el prompt. Lo que rige es el golden
+  # (`medgraph/tests/golden/extraccion/derecho__prompt.txt`).
+  rules: |-
+    - Nombres canónicos en español, minúscula.
+    - Normas SIEMPRE con número: "ley 25.065" (no "ley de tarjetas").
+    - Artículos con su norma: "articulo 14 ley 25.065" (no "art. 14" suelto).
+    - "art. 14 LDC" → "articulo 14 ley 24.240" · "CCyC" se mantiene como "ccyc".
+    - Texto vigente manda: si un artículo fue sustituido (ej. DNU 70/2023), extraer la
+      relación MODIFICA, no tratar el texto viejo como vigente.
+    - NO extraer números de expediente, fechas ni montos como entidades.
+
+# `max_name_length: 120` es el valor que usaba `legal_extractor.py` (medicina usa 100): el nombre
+# canónico de un artículo lleva su norma adentro ("articulo 770 codigo civil y comercial de la
+# nacion") y con 100 se cortaba. Los otros dos valores son los mismos de medicina y declaran la
+# misma conducta: los acentos NO se pliegan y una entidad se liga a lo sumo a diez unidades.
+canonicalization:
+  merge_synonyms: true
+  min_name_length: 2
+  max_name_length: 120
+  fold_accents: false
+  max_menciones: 10
