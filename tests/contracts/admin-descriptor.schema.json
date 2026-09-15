@@ -148,6 +148,118 @@
         "description": "Extensiones en minuscula y con punto."
       }
     },
+    "settings_slots": {
+      "type": "array",
+      "description": "QUE SE LE PUEDE CONFIGURAR a esta instancia: las credenciales y los modelos con que habla con sus proveedores. Es a las claves lo que `source_fields` es a la metadata de una fuente --el vocabulario lo pone el backend--: la consola no sabe que es un embedding, un reranker ni un Neo4j, y aun asi dibuja la pantalla. Obligatorio si capabilities.settings es true. ACA VIAJA LA FORMA (que proveedores admite el slot, que modelos, que se rompe si se cambia), NUNCA EL VALOR: el estado de cada slot es admin-settings/v1, y tampoco lleva el valor. Diseño: NOMOS_CONSOLE_BYOK.md (14-sep-2026).",
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "purpose", "providers", "impact", "editable", "house_key", "house_fallback"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": ["embeddings", "extraction", "classification", "rerank", "graph", "instance_auth", "evidence"],
+            "description": "Vocabulario CERRADO de slots (§3 del diseño). Cerrado a proposito: la consola tiene copy y consecuencias POR SLOT (cambiar `embeddings` deja el corpus en otro espacio semantico; rotar `instance_auth` te deja afuera de tu propia consola), y un id libre seria una tarjeta sin trato. Cada instancia publica los que tiene: MedGraph no publica `instance_auth` (rotarla es la tanda T6) y LexGraph no publica `rerank` ni `evidence`."
+          },
+          "label": { "type": "string" },
+          "purpose": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "description": "El PROPOSITO que un call site del backend declara para recibir esta clave (herencia de Dashbro: claves con `purposes[]`, y un call site que no declara proposito no puede recibir la clave de la casa). Hoy coincide con `id` en las dos instancias; existe separado porque el proposito es del CONSUMIDOR y el slot es de la CONFIGURACION: el dia que un slot sirva a dos propositos, el contrato no cambia."
+          },
+          "providers": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Proveedores que este slot admite, en el orden en que la consola los ofrece. `vertex_adc` (la cuenta de servicio, SIN clave) es un proveedor de PRIMERA CLASE y no un caso especial: es lo que MedGraph usa hoy para embeber, y un contrato que asuma 'clave' deja a MedGraph afuera.",
+            "items": {
+              "type": "object",
+              "required": ["id", "label", "needs_key"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "vertex_adc | gemini_api | openai | anthropic | voyage | neo4j | pubmed | ..." },
+                "label": { "type": "string" },
+                "needs_key": { "type": "boolean", "description": "false = no hay nada que pegar (vertex_adc autentica con la cuenta de servicio). La consola no pide valor para estos, y el slot puede estar `configured` con `hint` null." }
+              }
+            }
+          },
+          "models": {
+            "type": "array",
+            "description": "Catalogo de modelos del slot. NO SE RETIPEA: sale de la constante del backend (MedGraph: `pipeline/embeddings.EMBEDDING_MODEL`), igual que `accepted_formats` sale de `upload.formatos_aceptados()`. Una vidriera que ofrece A y un motor que corre B es, palabra por palabra, el bug de honestidad.",
+            "items": {
+              "type": "object",
+              "required": ["id", "label"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string" },
+                "label": { "type": "string" },
+                "dims": { "type": ["integer", "null"], "minimum": 1, "description": "Dimension del vector. OBLIGATORIA si `impact` es reindex_corpus: sin esto la consola no puede decir en cuantas dimensiones esta hoy el corpus ni que cambiarlo lo deja en otro espacio." },
+                "default": { "type": "boolean", "default": false },
+                "eol": { "type": ["string", "null"], "description": "Fecha de retiro anunciada por el proveedor (ISO 8601), o null. Existe porque un modelo retirado con el corpus de rehen es un accidente ya pagado en otro producto (Imagen 4, 17-ago-2026): el selector no debe ofrecer ficcion." }
+              }
+            }
+          },
+          "fields": {
+            "type": "array",
+            "description": "Campos propios del slot cuando no alcanza con 'una clave'. `graph` usa esto: uri, username, password (secret) y database. Vacio o ausente = el slot es una sola credencial.",
+            "items": {
+              "type": "object",
+              "required": ["name", "label", "type"],
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                "label": { "type": "string" },
+                "type": { "type": "string", "enum": ["string", "secret"], "description": "secret = no vuelve NUNCA por la API y la consola lo pide con type=password." },
+                "required": { "type": "boolean", "default": false }
+              }
+            }
+          },
+          "impact": {
+            "type": "string",
+            "enum": ["none", "reprocess_new", "restart_connection", "reindex_corpus"],
+            "description": "QUE PASA CON LO YA PROCESADO si este slot cambia. none: nada. reprocess_new: lo nuevo se procesa con otro criterio y el corpus queda con dos. restart_connection: se rehace la conexion (y probar el slot `graph` ademas DESPIERTA la VM). reindex_corpus: lo ya embebido queda en otro espacio semantico y la busqueda se degrada SIN dar error --por eso la consola pide confirmacion tipeada--."
+          },
+          "test": {
+            "type": "object",
+            "required": ["supported"],
+            "additionalProperties": false,
+            "description": "La prueba del slot. `cost_note` es lo que la pantalla muestra ANTES de apretar: un probe puede costar plata (en Dashbro, USD 0,04 por click) o despertar una VM apagada.",
+            "properties": {
+              "supported": { "type": "boolean" },
+              "cost_note": { "type": "string", "description": "En el idioma de la instancia, como Error.detail." }
+            }
+          },
+          "editable": {
+            "type": "boolean",
+            "description": "¿Se puede CAMBIAR este slot desde la consola, o solo mirarlo? Mismo papel que `source_fields[].editable`: si es false, `PUT /admin/v1/settings/{slot}` responde 403 capability_disabled y la consola no dibuja el boton de cambiar. Existe porque ver y cambiar llegan en tandas distintas a proposito --una instancia puede publicar el slot, su proveedor y su impacto mucho antes de dejar que alguien lo toque-- y porque hay slots que se muestran para NO cambiarlos desde una pantalla: cambiar `embeddings` es una re-indexacion de dias, no un boton. Publicar un slot sin decir esto dejaria a la consola adivinando, y adivinar de mas es un boton que falla contra el backend."
+          },
+          "house_key": { "type": "boolean", "description": "Existe clave de la casa para este slot (la que la instancia tiene montada hoy). Si es false y no hay BYOK, el slot no funciona: la consola lo pinta en ambar y dice que no se puede hasta configurarlo." },
+          "house_fallback": {
+            "type": "boolean",
+            "description": "Si una BYOK de este slot falla, ¿se cae a la clave de la casa? DEFAULT FALSE Y DECLARADO POR SLOT, nunca por bandera global: un fallback ciego hace que el consumo lo pague el dueño de la instancia en silencio, y en Dashbro esa es 'la linea mas peligrosa del arco' --la firma no cambia y el diff solo muestra una funcion que devuelve algo en vez de None--. Se publica SIEMPRE, aunque sea false, porque la tarjeta lo muestra: un fallback invisible es el mismo accidente."
+          },
+          "rotate": {
+            "type": "boolean",
+            "default": false,
+            "description": "¿Se puede ROTAR este slot (`POST /admin/v1/settings/{slot}/rotate`)? Ausente = false, como `facets` o `units`: una instancia de T1-T5 no queda obligada a nada.\n\nROTAR NO ES CAMBIAR, y por eso es un campo aparte de `editable` y no un caso suyo. `editable` es REEMPLAZAR: entra la nueva y la vieja deja de valer en el mismo instante. `rotate` es AGREGAR: la nueva entra y la vieja SIGUE VALIENDO hasta que alguien la retire, que es la unica forma de cambiar la credencial con la que entran la consola y el MCP sin cortarlos en el medio. Un slot puede ser rotable y no editable --`instance_auth` lo es-- justamente porque reemplazarla de un saque es dejarse afuera de la propia consola.\n\nEl valor de la clave nueva lo manda quien rota (`SettingsUpdate.value`): una clave generada por el backend tendria que VOLVER en la respuesta para que alguien pudiera usarla, y el valor no vuelve nunca."
+          },
+          "purge": {
+            "type": "boolean",
+            "default": false,
+            "description": "¿Se pueden DESTRUIR las versiones viejas del secreto de este slot (`POST /admin/v1/settings/{slot}/purge`)? Ausente = false.\n\nSE PUBLICA EN FALSE CUANDO EL DESPLIEGUE PINEA UNA VERSION FIJA, y ese es el motivo real y medido: si el servicio monta el secreto por numero (`version = \"5\"`) en vez de por `latest`, destruir esa version no degrada nada -- deja al servicio SIN ARRANCAR en el proximo cold start--. Un boton que puede impedir que el servicio bootee no se dibuja 'por las dudas': la instancia dice cuales puede purgar y cuales no.\n\nLa purga jamas toca `latest` ni la version en uso, exige el nombre de la instancia tipeado y tiene vista previa: `versions.total` y `versions.retained` del estado ya dicen cuantas hay y cuantas quedarian, sin gastar una llamada."
+          }
+        },
+        "allOf": [
+          {
+            "description": "Un slot que re-indexa el corpus tiene que publicar la DIMENSION de sus modelos. Es la unica cifra con la que la consola puede decir la consecuencia real ('90.806 unidades embebidas en 3072d quedarian en otro espacio semantico'), y sin ella el dialogo de cambio seria un boton sin advertencia sobre la operacion mas cara del sistema.",
+            "if": { "required": ["impact"], "properties": { "impact": { "const": "reindex_corpus" } } },
+            "then": {
+              "required": ["models"],
+              "properties": { "models": { "minItems": 1, "items": { "required": ["dims"], "properties": { "dims": { "type": "integer" } } } } }
+            }
+          }
+        ]
+      }
+    },
     "capabilities": {
       "type": "object",
       "description": "Que operaciones ofrece esta instancia. La consola oculta lo que es false; el backend ademas responde 403 capability_disabled si se lo llama.",
@@ -163,13 +275,14 @@
         "wake": { "type": "boolean", "description": "El grafo vive apagado y una consulta lo despierta: /health puede responder sleeping y las rutas 503 WarmingUp + Retry-After." },
         "facets": { "type": "boolean", "description": "La instancia calcula GET /sources/facets: que valores existen en cada campo filtrable, con su conteo. Sin esto, un campo filtrable que no es enum solo se puede filtrar escribiendo el valor exacto. Opcional por retrocompatibilidad: ausente = false." },
         "units": { "type": "boolean", "description": "La instancia expone GET /sources/{id}/units y /sources/{id}/units/{unit_id}: ABRIR una unidad indexable (chunk, articulo) en modo diagnostico, solo lectura. Cierra el circuito de una evaluacion: el numero dice que la consulta trajo el pasaje equivocado, y esta es la pantalla donde se mira POR QUE. Si esta en true, `unit_types` es obligatorio. Opcional por retrocompatibilidad, igual que `facets`: ausente = false." },
+        "settings": { "type": "boolean", "description": "La instancia expone /admin/v1/settings: VER (y desde la tanda T3 cambiar) las claves y los modelos con que habla con sus proveedores, sin que el valor de ninguna clave viaje jamas. Si esta en true, `settings_slots` es obligatorio --mismo patron que `units` con `unit_types`--: la consola no puede dibujar una tarjeta de 'Embeddings' adivinando que proveedores acepta esta instancia ni que rompe cambiarlos. Opcional por retrocompatibilidad, igual que `facets`, `units` y `vectorize`: ausente = false, y una instancia que no la publica no queda obligada a explicar nada. Diseño: NOMOS_CONSOLE_BYOK.md (14-sep-2026)." },
         "vectorize": { "type": "boolean", "description": "La instancia expone POST /sources/{id}/vectorize: embeber las unidades que quedaron SIN vector, sin re-ingestar la fuente. Es el boton que necesita el aviso `sin_vector` de job/v1 (13-sep-2026): un job puede terminar en `loaded` con parte del material sin embedding porque el proveedor de embeddings estuvo caido mas de lo que aguantan los reintentos, y mostrar eso sin ofrecer como arreglarlo no es una pantalla de administracion. Re-ingestar seria volver a parsear, volver a cargar y volver a pagar los vectores que ya estaban. Una instancia cuyo corpus no se vectoriza (LexGraph: la norma se cita por lookup exacto) simplemente no publica la clave. Opcional por retrocompatibilidad, igual que `facets` y `units`: ausente = false." }
       }
     },
     "capability_notes": {
       "type": "object",
       "description": "Por que una capacidad esta en false y como se desbloquea. Bloque HERMANO de `capabilities`, no un reemplazo: `capabilities` sigue siendo {nombre: boolean} porque la consola lo lee con `!!` (src/features/fuentes/components/panel-fuente.tsx:170) y un objeto ahi adentro evalua truthy, o sea que una instancia que publico delete:false mostraria el boton de borrar. Obligatorio para CADA capacidad declarada false (allOf, abajo). Una capacidad en true no lleva nota: si funciona, no hay nada que explicar. El texto viaja en el idioma de la instancia, como Error.detail; el que enruta es `kind`, nunca el texto.",
-      "propertyNames": { "enum": ["upload", "classify", "review", "edit", "delete", "reingest", "explore", "wake", "facets", "units", "vectorize"] },
+      "propertyNames": { "enum": ["upload", "classify", "review", "edit", "delete", "reingest", "explore", "wake", "facets", "units", "vectorize", "settings"] },
       "additionalProperties": {
         "type": "object",
         "required": ["kind", "reason", "how_to_unblock"],
@@ -313,6 +426,22 @@
         "properties": { "capabilities": { "required": ["units"], "properties": { "units": { "const": true } } } }
       },
       "then": { "required": ["unit_types"] }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. `settings` es opcional con el mismo patron que `facets`, `units` y `vectorize`: el `if` pide la CLAVE, asi que una instancia que no la publica (ausente = false) no queda obligada a explicar una capacidad que no sabia que existia. Publicarla en false EXPLICITO si obliga, y el caso tipico es `not_configured`: el codigo existe y a esta instancia le falta el permiso de escribir versiones de secretos.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["settings"], "properties": { "settings": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["settings"] } } }
+    },
+    {
+      "description": "Si la instancia deja configurar claves, tiene que decir CUALES. Mismo patron que `units` con `unit_types` y `upload` con `accepted_formats`: sin los slots la consola no puede dibujar una sola tarjeta, porque no sabe que proveedores acepta este grafo ni que se rompe si se cambian.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["settings"], "properties": { "settings": { "const": true } } } }
+      },
+      "then": { "required": ["settings_slots"], "properties": { "settings_slots": { "minItems": 1 } } }
     },
     {
       "description": "Una capacidad en false tiene que decir por que y como. `vectorize` es opcional con el mismo patron que `facets` y `units`: el `if` pide la CLAVE, asi que una instancia que no la publica (ausente = false, por ejemplo porque su corpus no se vectoriza) no queda obligada a explicar nada. Publicarla en false EXPLICITO si obliga: ahi alguien decidio algo y hay algo que contar.",
