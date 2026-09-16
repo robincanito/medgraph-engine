@@ -82,6 +82,96 @@ INICIO_MAX_REFERENCIAS = 0.25
 CODIGO_CLASIFICACION = re.compile(r"\b[A-Z]\d{2}\.\d{1,2}\b")
 MIN_CODIGOS_INDICE = 8
 
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# EL INDICE ANALITICO DE UN TRATADO (16-sep-2026, §1.2 y §4.2 de
+# nomos/knowledge/DISENO-uso-real-16sep.md).
+#
+# POR QUE. Los ocho pasajes que el informe de uso real reporto como "Capitulo 505 Educacion
+# medica para el futuro" son TODOS de meneghello-t2, paginas 1380 a 1457, y su texto es el
+# INDICE ANALITICO del tomo ("fenitoina, 535 fenobarbital, 535 ..."). No eran una fuente
+# distinta ni un capitulo mal calculado: ~75 paginas de indice que la ingesta trata como
+# CUERPO, porque hasta hoy la unica regla de `indice` era la del CIE-10 (codigo con punto,
+# >= 8 por chunk) y un indice analitico no tiene ni un codigo asi. Tambien cae aca
+# fundamentos-derma p.157 (indice alfabetico). Un solo origen, una sola cura.
+#
+# UN PAR "TERMINO, NUMERO DE PAGINA": al menos tres letras, coma, numero de pagina. El numero
+# admite sufijo de columna ("1438c") y rango ("723-725"), que es como los imprimen los
+# tratados. No se pide mayuscula inicial: en un indice a dos niveles la subentrada va en
+# minuscula ("difusamente adherente, 723").
+PAGINA_DE_INDICE = r"\d{1,4}[a-z]?(?:\s?-\s?\d{1,4}[a-z]?)?"
+PAR_TERMINO_PAGINA = re.compile(rf"[^\W\d_]{{3,}},\s?{PAGINA_DE_INDICE}\b")
+
+# UNA ENTRADA DE INDICE GENERAL (los PRELIMINARES: el sumario del principio del libro).
+# "1.2 Carga de enfermedad 17". El diseño la describe por linea
+# (`^\d+(\.\d+)*\s+.+\s+\d+$`) y ACA NO HAY LINEAS: `generate_chunks_v2` rearma el chunk con
+# " ".join(palabras) (ver el docstring de classify_content_type), asi que la misma forma se
+# reconoce sobre palabras — numeracion, un puñado de palabras sin digitos ni puntos, y el
+# numero de pagina. El techo de 60 caracteres es lo que separa un titulo de un parrafo.
+#
+# LA NUMERACION LLEVA AL MENOS UN PUNTO, y esto NO estaba en el diseño: se midio el
+# 16-sep-2026 y sin el la regla se comia una tabla de dosis entera. `(\.\d+)*` admite cero
+# puntos, o sea la forma "numero palabra numero", que es EXACTAMENTE la forma de una columna
+# de dosis ("... 50-75 Ceftazidima 150 Tobramicina 5-7 ..."): 18 falsos pares en un chunk de
+# 72 palabras. Con el punto obligatorio, esa tabla da CERO y el sumario sigue dando 16 (sus
+# subentradas 1.1, 1.2, 2.1... son las que lo declaran sumario). El costo esta dicho: un
+# indice general de un solo nivel ("1 Introduccion 15 2 Metodos 20") no se reconoce por esta
+# via y queda `body`, que es la conducta de hoy — marca, no frena.
+ENTRADA_INDICE_GENERAL = re.compile(
+    rf"\b\d{{1,3}}(?:\.\d{{1,3}}){{1,3}}\.?\s+[^\W\d_][^\d.]{{2,60}}?\s{PAGINA_DE_INDICE}\b")
+
+# EL REFUERZO POR PALABRA: "(Cont.)" encabeza la continuacion de un indice partido entre
+# paginas y "Vease" es la remision cruzada que solo existe en un indice. Ninguna de las dos
+# alcanza sola (ver `_es_indice`): bajan el umbral de densidad, no lo reemplazan.
+REFUERZO_INDICE = re.compile(r"(?i)\((?:cont\.?|continuaci[oó]n)\)|\bv[eé]ase\b")
+
+# CUANTOS PARES HACEN UN INDICE. 12 en un chunk de 280 palabras (la mediana del corpus) es
+# una entrada cada 23 palabras: un parrafo de prosa que cite tres trabajos no llega ni cerca,
+# y el indice analitico real esta en 60-70 (una entrada cada 4 palabras). Se exige el numero
+# ABSOLUTO y la DENSIDAD: el absoluto frena el fragmento corto con dos pares, la densidad
+# frena el capitulo largo que arrastra una tabla de referencias cruzadas al final.
+MIN_PARES_INDICE = 12
+MIN_PARES_INDICE_CON_REFUERZO = 8
+PALABRAS_DE_REFERENCIA_INDICE = 280
+
+# UN INDICE *ES* SUS ENTRADAS, y esta es la condicion que de verdad separa (medida el
+# 16-sep-2026, y no estaba en el diseño). La densidad sola no alcanzaba: un cuadro clinico con
+# dosis escritas con coma —"Cefalexina, 25 a 50 mg/kg/dia ... Clindamicina, 30 mg/kg/dia"—
+# llega a 34 pares por 280 palabras y pasaba como indice. La diferencia esta en cuanto del
+# texto SON las entradas: en el indice analitico las entradas cubren el 43-81 % de los
+# caracteres (las cuatro muestras reales de meneghello-t2 y fundamentos-derma) y en el cuadro,
+# el 27 % — el resto es la prosa de la columna "tratamiento de eleccion". El umbral va en el
+# medio de las dos mediciones.
+MIN_COBERTURA_INDICE = 0.35
+
+# LAS TRES CONDICIONES DURAS, y van JUNTAS con la densidad — nunca sueltas. La leccion es del
+# 13-sep-2026: la forma corta del CIE-10 ("X00") tomada sola mordio 30 chunks de contenido
+# clinico real (B12, P53, C16). Un indice analitico, ademas de tener pares, NO TIENE PROSA:
+#   · un quinto de sus palabras son numeros de pagina (`MIN_RATIO_NUMERICO_INDICE`);
+#   · no tiene oraciones — casi ningun punto final (`MAX_PUNTOS_POR_PALABRA_INDICE`: la prosa
+#     clinica del corpus esta en ~0,05, o sea una oracion cada 20 palabras);
+#   · no tiene verbos — `es`, `se`, `puede`, `debe`, `son` son las cinco palabras que aparecen
+#     en cualquier parrafo medico y en ninguna entrada de indice.
+# Una tabla de dosis reconstruida por `render_tabla` tiene el ratio numerico de un indice y
+# ninguna de las otras dos cosas; por eso las tres se piden a la vez.
+MIN_RATIO_NUMERICO_INDICE = 0.20
+MAX_PUNTOS_POR_PALABRA_INDICE = 0.02
+MAX_VERBOS_POR_PALABRA_INDICE = 0.02
+VERBOS_FRECUENTES = frozenset({"es", "se", "puede", "debe", "son"})
+
+# Un token que es SOLO un numero de pagina (con su sufijo, su rango y la puntuacion pegada).
+TOKEN_NUMERICO = re.compile(rf"^{PAGINA_DE_INDICE}[.,;:]?$")
+# Un final de oracion: la misma idea que `_find_sentence_boundary`, sin contar "1." ni "3.2.".
+FIN_DE_ORACION = re.compile(r"[.?!]$")
+SOLO_NUMERACION = re.compile(r"^\d+(?:\.\d+)*\.?$")
+
+# LA POSICION COMO REFUERZO, NUNCA COMO CONDICION (16-sep-2026). El indice analitico vive al
+# final del libro y el sumario al principio, pero un chunk no es indice POR ESTAR ahi: la
+# ultima pagina de un tratado tambien puede ser el colofon de un capitulo. Estar en el ultimo
+# 5 % o en las primeras `MAX_PAGINAS_PRELIMINARES` paginas baja el umbral de densidad de 12 a
+# 8 pares; las tres condiciones duras se siguen exigiendo enteras.
+FRACCION_FINAL_DEL_LIBRO = 0.05
+MAX_PAGINAS_PRELIMINARES = 30
+
 # LA MAQUETA NO ES CONTENIDO (13-sep-2026, items C-1/C-2 de la auditoria de exposicion). El
 # encabezado y el pie de pagina se cuelan en CADA chunk: suman terminos al indice full-text, entran
 # al texto que se embebe y no dicen nada del tema. Se los reconoce por la FORMA -repeticion y aviso
@@ -129,6 +219,69 @@ AVISO_DE_DERECHOS = re.compile(
     r'(?i)^(?=.{1,' + str(MAX_CHARS_MAQUETA) + r'}$).*'
     r'(?:(?:©|\(c\))\s*\d{4}|copyright|derechos\s+reservados|fotocopiar).*$',
     re.MULTILINE)
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# LA CALIDAD DEL TEXTO, POR CHUNK Y POR FORMA (16-sep-2026, §1.6 y §4.2 del diseño).
+#
+# QUE HUECO CIERRA. `text_quality` NO lo calculaba el pipeline: cero ocurrencias en
+# `pipeline/` y en `api/services/ingest.py`. Lo escribio UNA vez `backfill_books.py` sobre una
+# MUESTRA DE SEIS CHUNKS por libro (25/50/75 % del libro) con dos firmas —letras sueltas y
+# palabras largas sin vocales— que NO VEN bytes de control, ni `U+FFFD`, ni `(cid:NN)`:
+# `.isalpha()` y `[^\W\d_]+` los descartan antes de contar. Medido sobre los 2.735 chunks que
+# el uso real toco: `sanguinetti-semiologia` 13 de 13 con bytes de control (CID desplazado,
+# "HVWH\x03PRWLYR") y `castano-lopez-laboratorio` 11 de 11 — y el catalogo daba las dos por
+# `ok`. La calidad pasa a calcularse ACA, por unidad, con las cinco firmas, y el `:Book` la
+# deriva de sus chunks (`pipeline/carga.py`) en vez de adivinarla con seis muestras.
+#
+# DOCTRINA (§3.3 del diseño de ingesta, y §4.2 de este): MARCA, NO FRENA. Nada se excluye del
+# corpus ni del retrieval por calidad; la etiqueta viaja para que quien lee sepa que tiene
+# delante. Por eso no hay un umbral de "descartar".
+#
+# LO QUE NUNCA ES TEXTO: un byte de control (el PDF con la fuente CID sin mapear los escupe),
+# el caracter de reemplazo U+FFFD (una decodificacion que fallo) y el literal "(cid:NN)" (el
+# extractor que se rindio y escribio el numero de glifo). Las tres son de FORMA y valen igual
+# en cualquier idioma y cualquier dominio.
+BYTES_DE_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+CARACTER_DE_REEMPLAZO = "�"   # U+FFFD, escapado: un literal invisible en el fuente no se revisa
+CID_LITERAL = re.compile(r"\(cid:\s?\d+\)")
+
+# LAS ETIQUETAS y donde corta cada una. Son los MISMOS numeros con los que `assess_quality`
+# venia juzgando libros enteros desde el 29-jul-2026 (corrupto > 0,30; sospechoso > 0,15), a
+# proposito: la escala no cambia de significado por mudarse de la fuente a la unidad.
+UMBRAL_CALIDAD_CORRUPTA = 0.30
+UMBRAL_CALIDAD_DUDOSA = 0.15
+
+# COMO SE COMPARAN CINCO FIRMAS QUE NO MIDEN LO MISMO. `calidad_valor` es la PEOR de las
+# cinco, y para que "peor" signifique algo cada una se normaliza contra su propia REFERENCIA:
+# la proporcion a la que esa firma sola ya dice "esto es basura". Un 10 % de bytes de control
+# es basura total; un 10 % de letras sueltas es un corpus sano (el corpus real mide 3-9 %).
+# Sin la normalizacion, la firma de los bytes de control —la que destapo sanguinetti— quedaba
+# debajo del umbral justo en el caso que vino a cazar (el chunk medido: 8 bytes en 78
+# caracteres, 0,10 crudo).
+REFERENCIA_CONTROL = 0.10
+REFERENCIA_REEMPLAZO = 0.05
+REFERENCIA_CID = 0.10
+# Las dos firmas historicas se miden en su propia escala (referencia 1,0): asi `dudosa` y
+# `corrupta` caen exactamente donde caian `suspect` y `corrupt`.
+REFERENCIA_LETRAS_SUELTAS = 1.0
+REFERENCIA_SIN_VOCALES = 1.0
+
+# LA PROPORCION NO ALFABETICA, con piso. Una tabla de dosis es legitimamente no alfabetica
+# —"Ceftriaxona 50-75 Ceftazidima 150" mide 0,30— y marcarla degradada fue justo el falso
+# positivo que se pago el 3-ago-2026 con los valores hematimetricos del PRONAP. Por eso esta
+# firma no cuenta desde cero: solo lo que pasa el PISO, reescalado hasta la REFERENCIA.
+PISO_NO_ALFABETICO = 0.45
+REFERENCIA_NO_ALFABETICO = 0.95
+
+# CUANTA EVIDENCIA HACE FALTA PARA JUZGAR POR TOKENS. Las firmas de caracteres (control,
+# reemplazo, cid) valen siempre: un byte de control en un texto de diez palabras ya es un
+# texto roto. Las de tokens necesitan muestra, o el ruido decide: un titulo de tres palabras
+# con una inicial suelta daria 33 % de letras sueltas.
+MIN_TOKENS_CALIDAD = 30
+MIN_PALABRAS_LARGAS_CALIDAD = 10
+#: Desde cuantos caracteres una palabra es "larga" para la firma CID (sin vocales).
+LARGO_PALABRA_SIN_VOCALES = 7
+VOCALES = frozenset("aeiouáéíóúüàèìòùâêîôûäëïöÿ")
 
 MIN_FILAS_TABLA = 2
 MIN_COLS_TABLA = 2
@@ -421,17 +574,95 @@ def extraer_texto_pagina(page) -> str:
     return plano if _pierde_contenido(plano, armado) else armado
 
 
-def classify_content_type(text: str) -> str:
+def _cerca_de_un_borde(page_start, total_pages) -> bool:
+    """El chunk esta en el ultimo 5 % del libro o en sus paginas preliminares?
+
+    ES UN REFUERZO Y NUNCA UNA CONDICION (16-sep-2026): un chunk no es indice por estar al
+    final, y por eso esta funcion solo baja el umbral de densidad en `_es_indice`. Sin las dos
+    paginas no dice nada: el material sin paginas (DOCX, HTML, EPUB — `pipeline/conversion.py`
+    las emite en None a proposito) simplemente no tiene refuerzo posicional.
+    """
+    if not page_start or not total_pages or total_pages <= 0:
+        return False
+    if page_start <= MAX_PAGINAS_PRELIMINARES:
+        return True
+    return page_start >= total_pages * (1 - FRACCION_FINAL_DEL_LIBRO)
+
+
+def _es_indice(text: str, palabras: list, page_start=None, total_pages=None) -> bool:
+    """Firma de INDICE (analitico de tratado o sumario del principio), sobre palabras.
+
+    Las CINCO condiciones van JUNTAS, y ese es todo el diseño de esta regla (§4.2 del diseño
+    del 16-sep-2026). La leccion esta pagada: el 13-sep la forma corta del CIE-10, tomada
+    sola, marco como indice 30 chunks de contenido clinico real. Aca:
+
+      1. DENSIDAD de pares "termino, pagina" (o de entradas de sumario): >= 12 por cada 280
+         palabras, y >= 12 en absoluto. Con refuerzo —"(Cont.)", "Vease", o estar en un borde
+         del libro— baja a 8, nunca a cero.
+      2. COBERTURA: las entradas son >= 35 % del texto. Un indice ES sus entradas; un cuadro
+         clinico las tiene adentro de otra cosa. Es la condicion que separa de verdad.
+      3. Un QUINTO de los tokens son numeros de pagina sueltos.
+      4. Casi ningun FIN DE ORACION: un indice no tiene oraciones.
+      5. Casi ningun VERBO frecuente: no tiene predicados.
+
+    Una tabla de dosis reconstruida cumple (3) y ninguna de las otras; un cuadro clinico con
+    cifras cumple (1) y (3) y falla (2); una lista de referencias falla (1), (2) y (4).
+    """
+    if not palabras:
+        return False
+    entradas = PAR_TERMINO_PAGINA.findall(text) + ENTRADA_INDICE_GENERAL.findall(text)
+    pares = len(entradas)
+    if not pares:
+        return False
+    if sum(len(e) for e in entradas) / max(len(text), 1) < MIN_COBERTURA_INDICE:
+        return False
+
+    numericos = sum(1 for p in palabras if TOKEN_NUMERICO.match(p))
+    if numericos / len(palabras) < MIN_RATIO_NUMERICO_INDICE:
+        return False
+
+    puntos = sum(1 for p in palabras if FIN_DE_ORACION.search(p) and not SOLO_NUMERACION.match(p))
+    if puntos / len(palabras) > MAX_PUNTOS_POR_PALABRA_INDICE:
+        return False
+
+    verbos = sum(1 for p in palabras if p.strip(".,;:()").lower() in VERBOS_FRECUENTES)
+    if verbos / len(palabras) > MAX_VERBOS_POR_PALABRA_INDICE:
+        return False
+
+    refuerzo = bool(REFUERZO_INDICE.search(text)) or _cerca_de_un_borde(page_start, total_pages)
+    minimo = MIN_PARES_INDICE_CON_REFUERZO if refuerzo else MIN_PARES_INDICE
+    densidad = pares / len(palabras) * PALABRAS_DE_REFERENCIA_INDICE
+    return pares >= minimo and densidad >= minimo
+
+
+def classify_content_type(text: str, page_start=None, total_pages=None) -> str:
     """Clasifica el tipo de contenido de un chunk.
+
+    Args:
+        text: el texto del chunk, tal como lo arma el chunker.
+        page_start: pagina donde empieza el chunk (opcional). None en el material sin
+            paginas y en cualquier llamador viejo.
+        total_pages: paginas del documento (opcional). Las dos juntas son un REFUERZO
+            posicional para la regla de indice, nunca una condicion (ver `_cerca_de_un_borde`).
 
     OJO: generate_chunks_v2 rearma el chunk con " ".join(palabras), asi que el
     texto que llega aca NO tiene saltos de linea. Todo criterio que cuente lineas
     ve una sola linea y no se dispara nunca. Por eso las tablas se reconocen por
     la firma que deja render_tabla, no por estructura de lineas.
+
+    LA RAMA `lista` SE ELIMINO EL 16-sep-2026, y no se reemplazo. Contaba lineas que empiezan
+    con viñeta o numeracion y pedia >= 3 de ellas; con el texto en UNA sola linea la cuenta
+    nunca pasaba de 1, asi que la rama no corrio NUNCA desde que existe el chunker v2 (el
+    diseño §4.2 la llama "codigo muerto"). Reescribirla sobre palabras habria reetiquetado
+    miles de chunks del corpus ya cargado, y `tipo_contenido` forma parte del TEXTO CANONICO
+    del embedding (`pipeline/embeddings.build_embedding_text` antepone "Tipo: X"): cambiar la
+    etiqueta obliga a re-embeber —que se paga— para un tipo que el retrieval NO excluye, o
+    sea sin ningun efecto sobre lo que se recupera. `lista` sigue en el enum de `chunk/v1`
+    porque hay chunks en el grafo que la llevan; el parser ya no la produce.
     """
-    lines = text.strip().split('\n')
-    if not lines:
+    if not text.strip():
         return "body"
+    palabras = text.split()
 
     # Lista de referencias bibliograficas: ver NO_CONTENIDO y CITA_BIBLIOGRAFICA arriba. Va PRIMERO
     # porque una lista de citas tambien tiene la firma de "lista" y a veces la de "tabla".
@@ -445,14 +676,14 @@ def classify_content_type(text: str) -> str:
     if len(CODIGO_CLASIFICACION.findall(text)) >= MIN_CODIGOS_INDICE:
         return "indice"
 
+    # Indice analitico de tratado o sumario de preliminares (16-sep-2026): ver `_es_indice`.
+    # Va ANTES de `tabla` porque un indice a dos columnas puede dejar alguna firma de tabla.
+    if _es_indice(text, palabras, page_start, total_pages):
+        return "indice"
+
     # Tablas: filas emitidas por render_tabla -> "valor (COLUMNA); valor (COLUMNA)."
     if len(re.findall(r'\([^()]{2,40}\);', text)) >= 3:
         return "tabla"
-
-    # Listas: muchas líneas empezando con -, *, •, números
-    list_lines = sum(1 for l in lines if re.match(r'^\s*[-*•●■]\s', l) or re.match(r'^\s*\d+[\.\)]\s', l))
-    if list_lines > len(lines) * 0.3 and list_lines >= 3:
-        return "lista"
 
     # Definiciones: empieza con patrones típicos
     first_100 = text[:200].lower()
@@ -460,6 +691,108 @@ def classify_content_type(text: str) -> str:
         return "definicion"
 
     return "body"
+
+
+def ratio_palabras_sin_vocales(text: str) -> float:
+    """Fraccion de palabras largas SIN ninguna vocal: la firma del CID desplazado.
+
+    LA FUNCION CANONICA (16-sep-2026). Vivia en `backfill_books.py::_ratio_sin_vocales`, que
+    es un script de una corrida; ahora vive en el pipeline y el script la importa de aca. Dos
+    detectores de lo mismo en dos archivos divergen en silencio, que es la doctrina de la casa
+    y el motivo por el que existe este modulo.
+
+    Con la fuente embebida sin mapear, el texto sale con las letras desplazadas y produce
+    palabras largas sin una sola vocal: "ODV DFWLYLGDGHV GLDULDV" era "las actividades
+    diarias". En español normal esto es ~0 (alguna sigla suelta). La firma de letras sueltas
+    NO lo ve, porque las palabras son largas. Detectado el 3-ago-2026 en
+    sina-up11-psicooncologia-pediatrica y en los titulos de sanguinetti-semiologia.
+    """
+    palabras = [w for w in re.findall(r"[^\W\d_]+", text, re.UNICODE)
+                if len(w) >= LARGO_PALABRA_SIN_VOCALES]
+    if len(palabras) < MIN_PALABRAS_LARGAS_CALIDAD:
+        return 0.0
+    return sum(1 for w in palabras if not (set(w.lower()) & VOCALES)) / len(palabras)
+
+
+def ratio_letras_sueltas(text: str) -> float:
+    """Fraccion de tokens que son UNA sola letra: la firma del PDF extraido caracter a caracter.
+
+    Sintoma: "e v e n l ar g e v ess els". Corpus sano: 3-9 %; el libro que lo destapo el
+    29-jul-2026 (diagnostic-pathology-gynecological-3ed) media 63,7 %.
+
+    SOLO TOKENS DE UNA LETRA, y esto se pago el 3-ago-2026: contar cualquier token de un
+    caracter daba falsos positivos en las tablas numericas, donde '<', '>', '•' y las unidades
+    ('g', 'L') son tokens legitimos — los valores hematimetricos del PRONAP daban 21,2 % con
+    el texto intacto, y marcarlos degradados deprioritizaba justo las tablas de referencia
+    que uno quiere.
+    """
+    tokens = re.findall(r"\S+", text)
+    if len(tokens) < MIN_TOKENS_CALIDAD:
+        return 0.0
+    return sum(1 for t in tokens if len(t) == 1 and t.isalpha()) / len(tokens)
+
+
+def ratio_no_alfabetico(text: str) -> float:
+    """Fraccion de caracteres visibles que no son letras (digitos, simbolos, puntuacion)."""
+    visibles = [c for c in text if not c.isspace()]
+    if not visibles:
+        return 0.0
+    return sum(1 for c in visibles if not c.isalpha()) / len(visibles)
+
+
+def _escalar(ratio: float, referencia: float, piso: float = 0.0) -> float:
+    """Una firma cruda -> 0-1, para que las seis se puedan comparar entre si.
+
+    `referencia` es la proporcion a la que esa firma SOLA ya significa "esto es basura", y
+    `piso` la que se tolera sin contar nada (solo la usa la proporcion no alfabetica, donde una
+    tabla de dosis es legitima). Sin esta normalizacion, la firma de los bytes de control
+    quedaba debajo del umbral justo en el caso que vino a cazar.
+    """
+    if ratio <= piso or referencia <= piso:
+        return 0.0
+    return min(1.0, (ratio - piso) / (referencia - piso))
+
+
+def firmas_de_calidad(text: str) -> dict:
+    """Las seis firmas, ya NORMALIZADAS a una escala comun (0-1). Ver los umbrales arriba.
+
+    Se devuelven todas —y no solo la peor— porque el diagnostico necesita saber CUAL disparo:
+    un chunk 'corrupta' por bytes de control se cura re-ingestando el PDF con OCR, y uno
+    'corrupta' por letras sueltas, re-extrayendo con otro extractor. Es la misma razon por la
+    que `admin-unit/v1` publica el estado del embedding y no un booleano.
+    """
+    largo = max(len(text), 1)
+    tokens = max(len(re.findall(r"\S+", text)), 1)
+    return {
+        "control": _escalar(len(BYTES_DE_CONTROL.findall(text)) / largo, REFERENCIA_CONTROL),
+        "reemplazo": _escalar(text.count(CARACTER_DE_REEMPLAZO) / largo, REFERENCIA_REEMPLAZO),
+        "cid": _escalar(len(CID_LITERAL.findall(text)) / tokens, REFERENCIA_CID),
+        "letras_sueltas": _escalar(ratio_letras_sueltas(text), REFERENCIA_LETRAS_SUELTAS),
+        "sin_vocales": _escalar(ratio_palabras_sin_vocales(text), REFERENCIA_SIN_VOCALES),
+        "no_alfabetico": _escalar(ratio_no_alfabetico(text), REFERENCIA_NO_ALFABETICO,
+                                  PISO_NO_ALFABETICO),
+    }
+
+
+def calidad_de_texto(text: str) -> tuple:
+    """(etiqueta, valor) de la calidad de UN chunk: `ok` | `dudosa` | `corrupta` y 0-1.
+
+    El valor es la PEOR de las firmas (`firmas_de_calidad`), ya normalizadas para que se
+    puedan comparar entre si, y la etiqueta sale de los dos umbrales con nombre. Es pura:
+    recibe texto y devuelve una tupla — sin grafo, sin red y sin el libro al que pertenece el
+    chunk, que es lo que permite correrla en el parseo y otra vez en un backfill.
+
+    MARCA, NO FRENA: ningun llamador de esta funcion excluye nada del corpus por lo que
+    devuelva. La etiqueta viaja hasta el resultado para que quien lee sepa que tiene delante.
+    """
+    if not text or not text.strip():
+        return ("ok", 0.0)
+    valor = max(firmas_de_calidad(text).values())
+    if valor > UMBRAL_CALIDAD_CORRUPTA:
+        return ("corrupta", round(valor, 3))
+    if valor > UMBRAL_CALIDAD_DUDOSA:
+        return ("dudosa", round(valor, 3))
+    return ("ok", round(valor, 3))
 
 
 # Letras sueltas separadas por un espacio: al menos 2 pares "letra espacio" seguidos de una
@@ -680,6 +1013,13 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
     if not all_words:
         return [], []
 
+    # LAS PAGINAS DEL DOCUMENTO, para el refuerzo posicional del detector de indice
+    # (16-sep-2026). Sale de las paginas que efectivamente llegaron —no de doc.page_count—
+    # porque `parse_pdf_v2` descarta las que no tienen texto, y porque el material sin
+    # paginas (DOCX, HTML, EPUB) las trae en None: ahi queda None y no hay refuerzo, que es
+    # exactamente lo que corresponde.
+    total_paginas = max((sp["page"] for sp in structured_pages if sp.get("page")), default=None)
+
     # Generar child chunks con overlap
     children = []
     pos = 0
@@ -708,6 +1048,12 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             prev["text"] = prev["text"] + " " + " ".join(all_words[pos:end])
             prev["word_count"] = len(prev["text"].split())
             prev["page_end"] = word_meta[end - 1][0]
+            # La calidad se vuelve a medir sobre el texto FINAL del chunk fusionado: es una
+            # medicion nueva (16-sep-2026) y medirla sobre un prefijo seria mentir barato.
+            # `tipo_contenido` NO se recalcula a proposito: es la conducta historica, y
+            # cambiarla reetiquetaria el ultimo chunk de cada libro del corpus —con su texto
+            # canonico de embedding— por una razon ajena a esta tanda.
+            prev["calidad"], prev["calidad_valor"] = calidad_de_texto(prev["text"])
             break
 
         chunk_text = " ".join(all_words[pos:end])
@@ -725,7 +1071,11 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             if word_meta[i][2] and word_meta[i][2] != seccion:
                 seccion = word_meta[i][2]
 
-        tipo = classify_content_type(chunk_text)
+        tipo = classify_content_type(chunk_text, page_start, total_paginas)
+        # LA CALIDAD SE MIDE ACA Y NO EN UN BACKFILL (16-sep-2026, §1.6 del diseño): es del
+        # chunk, se calcula con el texto que se va a guardar y viaja con el. El `:Book` la
+        # deriva de sus chunks en `pipeline/carga.py`; no hay una segunda medicion por muestreo.
+        calidad, calidad_valor = calidad_de_texto(chunk_text)
 
         children.append({
             "id": f"{libro_id}_v2_{chunk_index:05d}",
@@ -737,6 +1087,8 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             "titulo_capitulo": capitulo,
             "titulo_seccion": seccion,
             "tipo_contenido": tipo,
+            "calidad": calidad,
+            "calidad_valor": calidad_valor,
             "parent_id": None,  # Se asigna después
             "chunk_index": chunk_index,
             "version": 2,

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nomos.unicrono.com/contracts/chunk/v1",
+  "title": "Chunk",
+  "description": "Un chunk (child) producido por el paso Parse/Chunk. Formaliza el formato v2 vigente del pipeline. Los ParentChunk usan la misma forma sin parent_id (y los children referencian su id).",
+  "type": "object",
+  "required": ["id", "libro_id", "text", "word_count", "chunk_index", "version"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "ID único del chunk: {libro_id}_v2_{NNNNN}",
+      "pattern": "^[a-z0-9-]+_v2_[0-9]{5}$"
+    },
+    "libro_id": {
+      "type": "string",
+      "description": "Slug de la fuente (v2 lo renombrará source_id)",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "text": { "type": "string", "minLength": 1, "description": "Texto limpio del chunk" },
+    "word_count": { "type": "integer", "minimum": 1 },
+    "chunk_index": { "type": "integer", "minimum": 0, "description": "Posición secuencial dentro de la fuente" },
+    "version": { "type": "integer", "const": 2, "description": "Versión del formato de chunking" },
+    "page_start": { "type": ["integer", "null"], "minimum": 0, "description": "Pagina del documento de origen donde empieza el chunk. NULL cuando la fuente no tiene paginas (HTML, DOCX, EPUB... convertidos con MarkItDown): la procedencia de esos formatos es capitulo/seccion, y fingir una pagina seria inventar la cita. Hasta el 13-sep-2026 era integer obligatorio y todo chunk no-PDF violaba el contrato." },
+    "page_end": { "type": ["integer", "null"], "minimum": 0, "description": "Idem page_start. Si los dos vienen, page_start <= page_end." },
+    "titulo_capitulo": { "type": "string" },
+    "titulo_seccion": { "type": "string" },
+    "tipo_contenido": {
+      "type": "string",
+      "enum": ["body", "tabla", "lista", "definicion", "referencias", "indice"],
+      "description": "Clasificación heurística del contenido (pipeline/parseo.py::classify_content_type). `referencias` (lista de citas bibliográficas) e `indice` son NO-CONTENIDO desde el 13-sep-2026: el retrieval los excluye porque compiten por el top-k con densidad de término y sin decir nada (medido: 10 de 1.010 puestos del gold, 4 de 10 en una consulta de asma para el índice CIE-10). Un chunk mixto —prosa que termina en la bibliografía del capítulo— sigue siendo `body` a propósito: marcarlo entero borra texto real. `indice` cubre desde el 16-sep-2026 tres formas y no una: la tabla de códigos de clasificación (CIE-10), el ÍNDICE ANALÍTICO de un tratado (pares «término, número de página» densos, sin oraciones ni verbos — eran las ~75 páginas de meneghello-t2 que salían rotuladas «Capítulo 505») y el sumario de los preliminares. `lista` ya NO LA PRODUCE el parser: su rama contaba líneas y el chunker v2 entrega el texto en una sola, así que no corrió nunca; sigue en el enum porque hay chunks cargados que la llevan."
+    },
+    "calidad": {
+      "type": "string",
+      "enum": ["ok", "dudosa", "corrupta"],
+      "description": "Calidad del TEXTO de esta unidad, medida por forma en el parseo (pipeline/parseo.py::calidad_de_texto, 16-sep-2026). Seis firmas normalizadas a una escala común: bytes de control, U+FFFD, literales (cid:NN), palabras largas sin vocales (la firma del CID desplazado), letras sueltas y proporción no alfabética. OPCIONAL y aditivo: un chunk parseado antes del 16-sep-2026 no la trae, y AUSENTE no significa `ok` sino `no medida` — quien la lea tiene que distinguir las dos cosas. MARCA, NO FRENA (§3.3 del diseño de ingesta, §4.2 del diseño del uso real): nada se excluye del corpus ni del retrieval por su calidad; la etiqueta viaja hasta el resultado para que quien lee sepa qué tiene delante. Antes de esto la calidad era por FUENTE y sobre una muestra de seis chunks (backfill_books.py), ciega a los bytes de control: `sanguinetti-semiologia` tenía 13 de 13 chunks con texto CID desplazado y el catálogo la daba por `ok`."
+    },
+    "calidad_valor": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "La PEOR de las firmas de calidad, normalizada a 0-1 (0 = impecable). Es lo que decide `calidad` con dos umbrales con nombre: > 0,30 `corrupta`, > 0,15 `dudosa`. Viaja además de la etiqueta porque el número ORDENA —cuál de dos chunks `dudosa` está peor— y la etiqueta sola no."
+    },
+    "parent_id": {
+      "type": ["string", "null"],
+      "description": "ID del ParentChunk contenedor ({libro_id}_v2_parent_{NNNNN})"
+    },
+    "text_busqueda": {
+      "type": "string",
+      "description": "text normalizado para fulltext: sin acentos, lowercase. Lo indexa busqueda_chunks_v2 / chunk_search"
+    },
+    "titulo_seccion_busqueda": { "type": "string" },
+    "titulo_capitulo_busqueda": { "type": "string" },
+    "keywords": { "type": "string", "description": "Términos concatenados para boost de keyword search" },
+    "embedding": {
+      "type": ["array", "null"],
+      "items": { "type": "number" },
+      "minItems": 3072,
+      "maxItems": 3072,
+      "description": "gemini-embedding-2, 3072d. Lo escribe Vectorize; ausente/null hasta entonces. En artefactos JSONL normalmente se omite (vive solo en el grafo)"
+    }
+  },
+  "additionalProperties": true
+}

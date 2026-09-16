@@ -431,7 +431,12 @@ class TestUnaSolaFuenteDeVerdad:
                  "render_tabla", "_tokens", "_pierde_contenido", "extraer_texto_pagina",
                  "classify_content_type", "_find_sentence_boundary", "generate_chunks_v2",
                  "detect_structure", "parse_pdf_v2",
-                 "_clave_de_linea", "lineas_repetidas", "quitar_lineas"}
+                 "_clave_de_linea", "lineas_repetidas", "quitar_lineas",
+                 # 16-sep-2026 (tanda 2 del diseño del uso real): el indice analitico y la
+                 # calidad por chunk. Entran a la lista el mismo dia que nacen.
+                 "_cerca_de_un_borde", "_es_indice", "calidad_de_texto", "firmas_de_calidad",
+                 "ratio_palabras_sin_vocales", "ratio_letras_sueltas", "ratio_no_alfabetico",
+                 "_escalar"}
 
     def _defs(self, rel):
         arbol = ast.parse((RAIZ / rel).read_text(encoding="utf-8"))
@@ -623,3 +628,105 @@ class TestElPdfConPieRepetido:
         hijos, _ = parseo.parse_pdf_v2(pdf_con_pie, "libro-con-pie")
         titulos = {c["titulo_capitulo"] for c in hijos} | {c["titulo_seccion"] for c in hijos}
         assert not any("Editorial" in t for t in titulos), titulos
+
+
+class TestElIndiceYLaCalidadDelEspejo:
+    """Las dos reglas que llegaron al espejo el 16-sep-2026 (tanda 2 del diseño del uso real).
+
+    QUE FIJAN. `pipeline/` no se edita aca: es un espejo byte a byte del pipeline privado. Lo
+    que vive aca es la REGRESION, para que un espejo desactualizado o una copia mal pegada se
+    note en el CI publico. Estas dos son las de esta tanda:
+
+      · `indice` reconoce el INDICE ANALITICO de un tratado —pares "termino, numero de pagina"
+        densos, sin oraciones ni verbos— y no solo la tabla de codigos de clasificacion. La
+        posicion de la pagina llega al clasificador como REFUERZO y nunca como condicion.
+      · Cada chunk sale con `calidad` y `calidad_valor`: la calidad del TEXTO, medida por
+        forma, con las firmas que ven los bytes de control y los literales `(cid:NN)` que un
+        detector por letras sueltas no puede ver.
+
+    Los textos son inventados, como todo el resto de esta suite.
+    """
+
+    INDICE = ("de shigatoxina, 723 difusamente adherente, 723 enteroagregativa, 723 "
+              "enterohemorragica, 723 sindrome uremico hemolitico, 724 enteroinvasiva, 723 "
+              "enteropatogena, 722 enterotoxigenica, 722 ") * 4
+    TABLA_DOSIS = ("Ceftriaxona 50-75 Ceftazidima 150 Tobramicina 5-7 Ampicilina 100-200 "
+                   "Gentamicina 5-7 Vancomicina 40-60 Meropenem 60-120 Cefotaxima 150-200 ") * 3
+    CORRUPTO = "Por HVWH\x03PRWLYR\x0f\x03HO\x03GLDJQyVWLFR\x03\\\x03OD\x03GH\x03ODV\x03DQH- PLDV"
+
+    def test_el_indice_analitico_es_indice(self):
+        assert parseo.classify_content_type(self.INDICE) == "indice"
+
+    def test_una_columna_de_dosis_no_lo_es(self):
+        assert parseo.classify_content_type(self.TABLA_DOSIS) == "body"
+
+    def test_la_prosa_no_lo_es_ni_al_final_del_libro(self):
+        assert parseo.classify_content_type(PARRAFO * 4) == "body"
+        assert parseo.classify_content_type(PARRAFO * 4, 998, 1000) == "body"
+
+    def test_la_posicion_es_un_refuerzo_opcional(self):
+        """La firma nueva tiene que aceptar los llamadores viejos de un solo argumento."""
+        assert parseo.classify_content_type(self.INDICE) == \
+            parseo.classify_content_type(self.INDICE, None, None)
+
+    def test_la_rama_lista_ya_no_existe(self):
+        vinetas = "\n".join(f"- item numero {i}" for i in range(12))
+        assert parseo.classify_content_type(vinetas) != "lista"
+
+    def test_la_calidad_ve_los_bytes_de_control(self):
+        assert parseo.calidad_de_texto(self.CORRUPTO)[0] == "corrupta"
+        assert parseo.calidad_de_texto(PARRAFO * 3)[0] == "ok"
+
+    def test_cada_chunk_sale_con_su_calidad(self):
+        hijos, _ = parseo.generate_chunks_v2(_paginas(), "libro-test")
+        assert hijos
+        assert all(c["calidad"] == "ok" and 0.0 <= c["calidad_valor"] <= 1.0 for c in hijos)
+
+    def test_la_carga_declara_los_dos_campos(self):
+        from pipeline import carga
+
+        assert carga.CAMPOS_CHUNK["calidad"] == "ok"
+        assert carga.CAMPOS_CHUNK["calidad_valor"] == 0.0
+
+
+class TestElContratoChunkV1:
+    """Todo chunk que este parser produce valida contra `chunk/v1` (copia en tests/contracts/).
+
+    POR QUE ESTA ACA. El engine ya vendorizaba tres schemas de `nomos-contracts` con su test de
+    paridad; `chunk/v1` faltaba, y es el que describe lo que ESTE paquete produce. Sin el, los
+    campos nuevos de un chunk podian salir del parseo sin que nada del lado publico dijera si
+    el contrato los admite — que es justo lo que paso el 13-sep-2026 con `page_start` en null.
+    """
+
+    @staticmethod
+    def _validador():
+        import json
+
+        from jsonschema import Draft202012Validator
+
+        schema = json.loads(
+            (RAIZ / "tests" / "contracts" / "chunk.schema.json").read_text(encoding="utf-8"))
+        return Draft202012Validator(schema)
+
+    def test_los_chunks_del_chunker_validan(self):
+        hijos, _ = parseo.generate_chunks_v2(_paginas(), "libro-test")
+        parseo.normalize_chunks(hijos)
+        validador = self._validador()
+        assert hijos
+        for chunk in hijos:
+            errores = sorted(validador.iter_errors(chunk), key=lambda e: list(e.path))
+            assert errores == [], (chunk["id"], [e.message for e in errores])
+
+    def test_la_calidad_y_su_valor_estan_declarados(self):
+        schema = self._validador().schema
+        assert schema["properties"]["calidad"]["enum"] == ["ok", "dudosa", "corrupta"]
+        assert schema["properties"]["calidad_valor"]["maximum"] == 1
+        assert "calidad" not in schema["required"], "es aditivo: el corpus viejo no la trae"
+
+    def test_el_schema_vendorizado_es_el_de_nomos_contracts(self):
+        """Paridad byte a byte, igual que los otros tres schemas (tests/test_admin_v1.py)."""
+        fuente = RAIZ.parent.parent / "nomos" / "nomos-contracts" / "schemas" / "chunk.schema.json"
+        if not fuente.exists():
+            pytest.skip("nomos-contracts no esta en este disco")
+        assert (RAIZ / "tests" / "contracts" / "chunk.schema.json").read_text(encoding="utf-8") == \
+            fuente.read_text(encoding="utf-8")

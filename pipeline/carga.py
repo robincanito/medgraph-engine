@@ -26,11 +26,18 @@ en la API. El modulo no sabe de conexiones y se testea con un doble (tests/test_
 BATCH_SIZE = 500
 
 # nombre -> default si el parser no lo trae. None = obligatorio (KeyError si falta).
+# `calidad`/`calidad_valor` (16-sep-2026, §4.2 del diseño del uso real): la calidad del texto
+# de CADA unidad, calculada en el parseo (`pipeline/parseo.calidad_de_texto`) y guardada con
+# el chunk. Llevan default porque el unico camino que no las trae es material parseado ANTES
+# de esta tanda —un `parsed/*.json` viejo recargado con `migrate_chunks`—, y para eso esta
+# `reclasificar_contenido.py --calidad`, que las calcula sin re-ingestar. Es el mismo criterio
+# con que `tipo_contenido` lleva "body" desde que existe este archivo.
 CAMPOS_CHUNK = {
     "libro_id": None, "text": None, "page_start": None, "page_end": None, "word_count": None,
     "titulo_capitulo": "", "titulo_seccion": "", "tipo_contenido": "body", "parent_id": "",
     "chunk_index": 0, "version": 2, "text_busqueda": "", "titulo_seccion_busqueda": "",
     "titulo_capitulo_busqueda": "", "keywords": "",
+    "calidad": "ok", "calidad_valor": 0.0,
 }
 CAMPOS_PARENT = {
     "libro_id": None, "text": None, "page_start": None, "page_end": None, "word_count": None,
@@ -159,13 +166,61 @@ WITH b, c LIMIT $lote
 MERGE (b)-[:CONTAINS]->(c)
 RETURN count(c) AS vinculados
 """
-CYPHER_CONTAR_FUENTE = """
-MATCH (b:Book {id: $lid})
-OPTIONAL MATCH (c:Chunk {libro_id: $lid})
-WITH b, count(c) AS chunks, count(c.embedding) AS emb, min(c.page_start) AS p0, max(c.page_end) AS p1
-SET b.chunk_count = chunks, b.embedded_count = emb, b.page_start = p0, b.page_end = p1
+# LA CALIDAD DE LA FUENTE SALE DE SUS UNIDADES (16-sep-2026, §1.6 y §4.2 del diseño del uso
+# real). Hasta hoy `text_quality` lo escribia UNA vez `backfill_books.py` sobre una MUESTRA DE
+# SEIS CHUNKS por libro, con dos firmas que no ven bytes de control: `sanguinetti-semiologia`
+# tenia 13 de 13 chunks con texto CID desplazado y el catalogo la daba por `ok`. Ahora la
+# calidad la mide el parseo por chunk (`pipeline/parseo.calidad_de_texto`) y la fuente la
+# DERIVA: `calidad_fraccion_degradada` es la fraccion de sus chunks marcados `dudosa` o
+# `corrupta`, y `text_quality` sale de esa fraccion con los umbrales de abajo. Los tres
+# nombres del enum (`ok`/`suspect`/`corrupt`) son los que ya lee `api/services/catalog.py` y
+# el descriptor de admin/v1: cambiarlos seria romper la consola por estetica.
+#
+# SOLO SE ESCRIBE SI HAY CHUNKS CON CALIDAD MEDIDA. Un corpus a medio backfillear haria que
+# esta sentencia le pusiera `ok` a un libro que nadie midio —pisando el `corrupt` que
+# backfill_books si habia acertado—, y un contador no puede borrar un diagnostico. La fraccion
+# se calcula sobre los chunks MEDIDOS, no sobre todos: decir "0 % degradado" de un libro con
+# tres chunks medidos de 5.000 seria otra forma de lo mismo.
+CALIDADES_DEGRADADAS = ("dudosa", "corrupta")
+UMBRAL_FUENTE_CORRUPTA = 0.30
+UMBRAL_FUENTE_DUDOSA = 0.10
+
+CYPHER_CONTAR_FUENTE = f"""
+MATCH (b:Book {{id: $lid}})
+OPTIONAL MATCH (c:Chunk {{libro_id: $lid}})
+WITH b, count(c) AS chunks, count(c.embedding) AS emb, min(c.page_start) AS p0, max(c.page_end) AS p1,
+     count(c.calidad) AS medidos,
+     count(CASE WHEN c.calidad IN {list(CALIDADES_DEGRADADAS)} THEN 1 END) AS degradados
+WITH b, chunks, emb, p0, p1, medidos,
+     CASE WHEN medidos > 0 THEN toFloat(degradados) / medidos ELSE null END AS fraccion
+SET b.chunk_count = chunks, b.embedded_count = emb, b.page_start = p0, b.page_end = p1,
+    b.calidad_fraccion_degradada = coalesce(fraccion, b.calidad_fraccion_degradada),
+    b.text_quality = CASE
+        WHEN fraccion IS NULL THEN b.text_quality
+        WHEN fraccion > {UMBRAL_FUENTE_CORRUPTA} THEN 'corrupt'
+        WHEN fraccion > {UMBRAL_FUENTE_DUDOSA} THEN 'suspect'
+        ELSE 'ok' END
 RETURN chunks, emb
 """
+
+def calidad_de_fuente(degradados: int, medidos: int) -> str | None:
+    """La calidad de una FUENTE a partir de sus unidades: `ok` | `suspect` | `corrupt`.
+
+    Es la MISMA regla que escribe `CYPHER_CONTAR_FUENTE` —los dos umbrales de arriba, cada uno
+    escrito una sola vez— y existe para poder mostrarla ANTES de escribir: el dry-run de
+    `reclasificar_contenido.py --calidad` dice a que va a pasar cada fuente, y una persona lo
+    lee. Sin unidades medidas no hay veredicto: devuelve None, y el que escribe conserva el que
+    ya habia en vez de inventar un `ok`.
+    """
+    if not medidos:
+        return None
+    fraccion = degradados / medidos
+    if fraccion > UMBRAL_FUENTE_CORRUPTA:
+        return "corrupt"
+    if fraccion > UMBRAL_FUENTE_DUDOSA:
+        return "suspect"
+    return "ok"
+
 
 CYPHER_PREVIEW_UNITS = "MATCH (c:Chunk {libro_id: $lid}) RETURN count(c) AS units"
 CYPHER_PREVIEW_PARENTS = "MATCH (p:ParentChunk {libro_id: $lid}) RETURN count(p) AS parents"
@@ -191,8 +246,9 @@ CYPHER_BORRAR_FUENTE = "MATCH (b:Book {id: $lid}) DETACH DELETE b"
 
 def registrar_fuente(query, write, libro_id: str, props: dict, lote: int = 5000) -> dict:
     """MERGE del :Book con sus propiedades, CONTAINS a todos sus chunks (en lotes) y conteos
-    frescos (chunk_count, embedded_count, paginas). Idempotente: re-registrar no duplica nada.
-    `props` con valor None no se escriben (no pisan lo que ya habia)."""
+    frescos (chunk_count, embedded_count, paginas, y desde el 16-sep-2026 la calidad derivada
+    de las unidades: `calidad_fraccion_degradada` y `text_quality`). Idempotente: re-registrar
+    no duplica nada. `props` con valor None no se escriben (no pisan lo que ya habia)."""
     write(CYPHER_REGISTRAR_FUENTE, {"lid": libro_id, "props": {k: v for k, v in props.items() if v is not None}})
     while True:
         if query(CYPHER_VINCULAR_FUENTE, {"lid": libro_id, "lote": lote})[0]["vinculados"] == 0:
