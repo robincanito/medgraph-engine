@@ -2,6 +2,7 @@
 
 
 from dotenv import load_dotenv
+from neo4j.exceptions import ServiceUnavailable, SessionExpired
 
 from pipeline.parseo import NO_CONTENIDO
 from services.graph import query
@@ -244,6 +245,36 @@ def _rrf_fusion(rankings: list[list], k: int = RRF_K) -> list:
     return results
 
 
+# LAS EXCEPCIONES QUE SIGNIFICAN "EL GRAFO NO CONTESTA" (16-sep-2026). No es una lista de errores
+# feos: es la frontera entre "no se pudo preguntar" y "se pregunto y no hay". Las relanza
+# `services/graph.query` despues de agotar sus reintentos. Cualquier otra cosa --el parser de la
+# consulta, una cuota del proveedor de embeddings, un TimeoutError-- es una ruta rota con el grafo
+# vivo, y eso se degrada, no se corta.
+#
+# `ConnectionError`/`OSError` NO estan a proposito: `graph.query` ya las reintenta y las relanza tal
+# cual, y desde afuera no se puede distinguir un socket del grafo de uno del proveedor de
+# embeddings. Si en un despliegue concreto hace falta, se agrega aca y en ningun otro lado.
+EXCEPCIONES_DE_GRAFO = (ServiceUnavailable, SessionExpired)
+
+
+def _es_de_grafo(e: BaseException) -> bool:
+    return isinstance(e, EXCEPCIONES_DE_GRAFO)
+
+
+def _falla(ruta: str, e: BaseException) -> dict:
+    """Una falla de ruta, en la forma que viaja en la respuesta.
+
+    `grafo` es lo que decide el codigo HTTP corriente arriba, asi que se calcula UNA vez y aca:
+    quien consume la respuesta no tiene por que conocer la jerarquia de excepciones del driver.
+    """
+    return {"ruta": ruta, "error": type(e).__name__, "grafo": _es_de_grafo(e)}
+
+
+def _a_relanzar(caidas: list) -> BaseException | None:
+    """La primera excepcion de grafo, o None si ninguna lo es."""
+    return next((e for e in caidas if _es_de_grafo(e)), None)
+
+
 def search_hybrid(query_text: str, top_k: int = 8, libro_id: str = None) -> dict:
     """Búsqueda híbrida con query rewriting + full-text + semántica + RRF.
 
@@ -251,6 +282,26 @@ def search_hybrid(query_text: str, top_k: int = 8, libro_id: str = None) -> dict
     2. Para cada sub-query: full-text top POOL + dense top POOL
     3. RRF fusion de todos los rankings
     4. Devuelve top_k resultados finales
+
+    QUE DEVUELVE CUANDO ALGO SE CAE (16-sep-2026). Hasta hoy los cuatro primeros casos de la tabla
+    eran indistinguibles desde afuera --`results: []` y un 200--, o sea que "el corpus no tiene
+    material sobre esto" y "no se pudo consultar el corpus" llegaban iguales al consumidor.
+
+    | Caso                                   | `degradado` | `fallas`        | Devuelve / lanza        |
+    |----------------------------------------|-------------|-----------------|-------------------------|
+    | Todo anduvo, hay material              | `None`      | `[]`            | dict con `results`      |
+    | Todo anduvo, no hay material           | `None`      | `[]`            | dict con `results: []`  |
+    | Una ruta caída, la otra trajo algo     | `"parcial"` | la ruta caída   | dict con `results`      |
+    | Cayeron rutas, ninguna es del grafo    | `"total"`   | las caídas      | dict con `results: []`  |
+    | Cayeron TODAS y alguna es del grafo    | —           | —               | **lanza** la del grafo  |
+
+    La última fila es la que cambia el contrato: `search_hybrid` LANZA en vez de devolver un vacío
+    mudo, y decide QUIEN LLAMA (`routers/search.py` lo convierte en 503 con `Retry-After`). Se lanza
+    sólo si fallaron TODAS las rutas: con una viva hay material que devolver, y eso vale más que el
+    código de error.
+
+    `fallas` es aditivo: `[{"ruta": "keyword"|"semantic", "error": "<NombreDeExcepcion>",
+    "grafo": bool}]`.
     """
     from services.query import preprocess
 
@@ -275,6 +326,13 @@ def search_hybrid(query_text: str, top_k: int = 8, libro_id: str = None) -> dict
     # bibliografia no se consulto, que en una herramienta cuya promesa es "cita libro y pagina"
     # es un fallo de correccion, no de disponibilidad. Se anotan para poder distinguirlas.
     fallas: list = []
+    # Y LAS EXCEPCIONES TAL CUAL, no solo su nombre (16-sep-2026): si todas las rutas se cayeron y
+    # alguna fue del grafo, hay que RELANZAR una --con su mensaje-- en vez de fabricar una nueva.
+    # El nombre en `fallas` es para el que lee la respuesta; el objeto es para el que arma el 503.
+    caidas: list = []
+    # Cuantas rutas se dispararon: N sub-queries lexicas + 1 semantica. Es el denominador de "se
+    # cayeron TODAS", que es lo unico que justifica cortar en vez de degradar.
+    rutas_totales = len(sub_queries) + 1
 
     with ThreadPoolExecutor(max_workers=len(sub_queries) + 1) as pool:
         kw_futures = [(sq, pool.submit(search_keyword, sq, RETRIEVAL_POOL, libro_id))
@@ -289,7 +347,8 @@ def search_hybrid(query_text: str, top_k: int = 8, libro_id: str = None) -> dict
                     total_keyword += len(kw)
             except Exception as e:
                 logging.error(f"Keyword search failed for '{sq}': {type(e).__name__}: {str(e)[:100]}")
-                fallas.append(("keyword", type(e).__name__))
+                fallas.append(_falla("keyword", e))
+                caidas.append(e)
 
         try:
             sem = sem_future.result()
@@ -298,13 +357,19 @@ def search_hybrid(query_text: str, top_k: int = 8, libro_id: str = None) -> dict
                 total_semantic += len(sem)
         except Exception as e:
             logging.error(f"Semantic search failed: {type(e).__name__}: {str(e)[:100]}")
-            fallas.append(("semantic", type(e).__name__))
+            fallas.append(_falla("semantic", e))
+            caidas.append(e)
 
     if not all_rankings:
         if fallas:
             telemetria.registrar("mcp_degradado", tool="search_hybrid", capa="retrieval",
-                                 rutas_caidas=[f"{r}:{e}" for r, e in fallas],
+                                 rutas_caidas=[f"{f['ruta']}:{f['error']}" for f in fallas],
                                  detalle="sin resultados PORQUE fallo el retrieval, no porque no haya material")
+        # EL VACIO DEJA DE SER LA UNICA SALIDA (16-sep-2026). Si se cayeron TODAS las rutas y al
+        # menos una fue del grafo, quien llama tiene que poder contestar 503: devolver `results: []`
+        # con 200 obliga al consumidor a adivinar. Se relanza DESPUES de registrar la telemetria.
+        if len(fallas) == rutas_totales and (exc := _a_relanzar(caidas)) is not None:
+            raise exc
         return {
             "keyword_count": 0,
             "semantic_count": 0,
@@ -315,13 +380,14 @@ def search_hybrid(query_text: str, top_k: int = 8, libro_id: str = None) -> dict
             # tiene derecho a saber que el corpus no se pudo consultar. Sin esto, una lista vacia
             # por caida se lee igual que "no hay material".
             "degradado": "total" if fallas else None,
+            "fallas": fallas,
         }
 
     if fallas:
         # Degradacion PARCIAL: una ruta respondio y la otra no. Hay resultados, pero peores que
         # los normales, y sin esto nadie se entera nunca.
         telemetria.registrar("mcp_degradado", tool="search_hybrid", capa="retrieval_parcial",
-                             rutas_caidas=[f"{r}:{e}" for r, e in fallas])
+                             rutas_caidas=[f"{f['ruta']}:{f['error']}" for f in fallas])
 
     # 3. RRF fusion de todos los rankings
     fused = _rrf_fusion(all_rankings)
@@ -359,4 +425,5 @@ def search_hybrid(query_text: str, top_k: int = 8, libro_id: str = None) -> dict
         # "parcial": hay resultados, pero una de las dos rutas de busqueda no contesto, asi que
         # son peores que los normales. Vale decirlo aunque no este vacio.
         "degradado": "parcial" if fallas else None,
+        "fallas": fallas,
     }
