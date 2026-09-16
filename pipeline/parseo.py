@@ -188,6 +188,47 @@ MIN_PAGINAS_REPETIDAS = 3
 # una: un pie suele traer el titulo corrido y el pie de imprenta en dos lineas, y un encabezado, el
 # nombre de la obra y el del capitulo. Mas que dos empieza a morder el primer parrafo.
 LINEAS_DE_BORDE = 2
+
+# EL FOLIO: la linea que es SOLO el numero de pagina impreso (16-sep-2026, tanda 6 del diseño
+# nomos/knowledge/DISENO-uso-real-16sep.md, §4.6 y la bitacora "Experimento de T6").
+#
+# QUE SE ROMPIO. La regla vivia como `re.sub(r'^\s*\d{1,4}\s*$', '', text, re.MULTILINE)`: borraba
+# CUALQUIER linea de 1 a 4 digitos, estuviera donde estuviera. Y PyMuPDF emite cada celda de una
+# tabla en su propio renglon, asi que toda celda que sea un numero corto sin separador desaparecia.
+# Medido sobre la Guia ITU SAP 2022 (19 pags, `find_tables()` no ve ni una tabla porque la maqueta no
+# tiene lineas): de la Tabla 5, "Amikacina 15 12-24 IV-IM" perdia el 15 -la dosis- y conservaba el
+# 12-24 y el 99,8, que tienen separador. Ese es el patron "tablas con celdas vacias" del informe de
+# uso real, y NO era la rama de tablas: era esta regex.
+#
+# LA INTENCION ERA EL FOLIO, y el folio esta en un BORDE. Asi que la regla se acota a lo que quiso
+# decir: sale a lo sumo UNA linea de digitos por borde, y solo si cae en el BORDE de la pagina — el
+# mismo borde que ya usa el filtro de maqueta, `LINEAS_DE_BORDE` lineas no vacias arriba y abajo. Una
+# celda de tabla vive en el medio de la pagina y sobrevive; el numero impreso arriba o abajo se va.
+#
+# POR QUE DOS LINEAS Y NO UNA (medido el 16-sep-2026; el borde de una sola linea era lo primero que
+# se probo). El folio casi nunca es la PRIMERA linea: viene detras del titulo corrido, que es
+# exactamente la razon por la que `LINEAS_DE_BORDE` ya valia 2 para la maqueta. En PRONAP
+# neurodesarrollo el orden de lectura es "horacio lejarraga • EVALUACION DEL DESARROLLO" / "12" /
+# el cuerpo: con borde de 1 linea sobrevivian 148 de las 180 lineas de digitos del libro -y ~120 de
+# ellas eran folios de verdad, uno por pagina-; con borde de 2, salen 152 y quedan 28, que son
+# celdas. En Sanguinetti, 938 lineas de digitos, 201 quitadas y 737 conservadas (antes: 938
+# borradas). El precio medido y aceptado: en las 8 paginas del INDICE de Sanguinetti la primera y la
+# ultima entrada pierden su numero de pagina (~12 numeros en todo el libro), porque ahi el borde de
+# la pagina es una entrada de indice. Son chunks que `classify_content_type` marca `indice` y que el
+# retrieval ya excluye, asi que el dano cae donde menos cuesta.
+#
+# LO QUE ESTA REGLA NO ATRAPA, dicho para que nadie lo redescubra: el folio que el orden de lectura
+# de PyMuPDF deja mas adentro que el borde (una pagina a dos columnas donde el bloque del pie sale
+# antes que el final de la segunda columna). Queda una linea de digitos en el medio del texto. Es el
+# precio de no comerse las celdas, y es el lado barato del error: un numero de mas en un chunk se
+# lee; una dosis de menos, no se ve.
+#
+# NO SE SOLAPA con la segunda pasada de maqueta (`lineas_repetidas` + `quitar_lineas`, que
+# `parse_pdf_v2` corre despues sobre el documento entero): esa mira tambien el borde pero exige que
+# la linea sea IDENTICA en >= 3 paginas, y un folio nunca lo es -cambia en cada pagina-. Lo que esa
+# pasada saca es el encabezado/pie con TEXTO, incluido el que lleva el numero pegado ("Cap. 3 -
+# Editorial X - 45"), que este filtro tampoco ve. Las dos reglas se reparten el borde sin pisarse.
+FOLIO_SUELTO = re.compile(r'^\s*\d{1,4}\s*$')
 # Mas largo que esto no es un encabezado ni un pie: es un PARRAFO que se repite, y borrar un parrafo
 # es borrar contenido. El techo se pago con una medicion (13-sep-2026): los PDF sinteticos de la QA
 # meten el mismo cuerpo en cada pagina en UNA linea larguisima -PyMuPDF no hace wrap-, asi que sin
@@ -251,8 +292,45 @@ CID_LITERAL = re.compile(r"\(cid:\s?\d+\)")
 UMBRAL_CALIDAD_CORRUPTA = 0.30
 UMBRAL_CALIDAD_DUDOSA = 0.15
 
-# COMO SE COMPARAN CINCO FIRMAS QUE NO MIDEN LO MISMO. `calidad_valor` es la PEOR de las
-# cinco, y para que "peor" signifique algo cada una se normaliza contra su propia REFERENCIA:
+# FIRMAS DURAS Y FIRMAS BLANDAS: QUIEN PUEDE DECIR "CORRUPTA" (16-sep-2026, dry-run de
+# `reclasificar_contenido.py --calidad` contra el grafo vivo — solo lectura, `data/reclasificacion/
+# dryrun.json`, bitacora del diseño nomos/knowledge/DISENO-uso-real-16sep.md).
+#
+# QUE MOSTRO LA MEDICION. Sobre los 91.032 chunks del corpus: corrupta 9.480 / dudosa 612 / ok
+# 80.940. Las corruptas son casi todas de las tres fuentes que de verdad estan rotas (atlas
+# ginecologico 7.489, Castaño 1.705, Sanguinetti 173). Pero las pocas que aparecian en fuentes
+# SANAS no eran corrupcion: eran TABLAS NUMERICAS y EPIGRAFES DE FIGURA — una tabla de valores de
+# referencia de Meneghello (0,34-0,50), la tabla de vacunas de Farreras con sus "x" y sus "Si"
+# (0,45), una formula quimica de DeVita (0,33), una tabla de tasas (0,62), un epigrafe de Abbas con
+# los marcadores A/B/C de la figura (0,81)—. En todas disparaban SOLAS las dos firmas que miden
+# forma tipografica y no decodificacion: letras sueltas y proporcion no alfabetica.
+#
+# LA REGLA. Esas dos, solas, llegan a lo sumo a `dudosa`. `corrupta` exige que la que cruce el
+# umbral sea una firma DURA: un byte de control, un U+FFFD, un "(cid:NN)", una palabra larga sin
+# vocales o texto ESPACIADO. Las cinco duras dicen "la decodificacion fallo" y ninguna aparece en
+# texto sano; las dos blandas dicen "esto no parece prosa", que es exactamente lo que es una tabla
+# de dosis. La doctrina no cambia —MARCA, NO FRENA—, pero una tabla de dosis no le puede decir
+# "texto corrupto" a quien la lee: la etiqueta viaja al resultado de la busqueda.
+#
+# LETRAS ESPACIADAS *NO* ES LETRAS SUELTAS, y la diferencia es la que salva el caso del
+# 29-jul-2026. `ratio_letras_sueltas` cuenta tokens de una letra ESTEN DONDE ESTEN: los
+# marcadores A/B/C de un epigrafe de figura y la columna de "x" de una tabla de vacunas puntuan
+# igual que un PDF extraido caracter a caracter. `ratio_letras_espaciadas` cuenta solo las que
+# vienen en CORRIDA deletreando una palabra ("l a i n s u f i c i e n c i a"), que es el sintoma
+# de diagnostic-pathology-gynecological-3ed y no le pasa a ninguna tabla. Ver esa funcion para las
+# tres condiciones de la corrida.
+#
+# LO QUE NO CAMBIA: la calidad de la FUENTE. `carga.CALIDADES_DEGRADADAS` cuenta `dudosa` Y
+# `corrupta` por igual, asi que bajar un chunk de corrupta a dudosa no mueve el `text_quality` de
+# ningun libro. Y `calidad_valor` sigue siendo la PEOR de las firmas, sin recortar: la etiqueta se
+# modera, la medicion no se toca. Tampoco cambia `calidad_valor` por sumar la firma nueva: toda
+# letra espaciada es tambien una letra suelta, asi que `espaciadas <= letras_sueltas` siempre y el
+# maximo es el mismo.
+FIRMAS_DURAS = ("control", "reemplazo", "cid", "sin_vocales", "espaciadas")
+FIRMAS_BLANDAS = ("letras_sueltas", "no_alfabetico")
+
+# COMO SE COMPARAN FIRMAS QUE NO MIDEN LO MISMO. `calidad_valor` es la PEOR de todas,
+# y para que "peor" signifique algo cada una se normaliza contra su propia REFERENCIA:
 # la proporcion a la que esa firma sola ya dice "esto es basura". Un 10 % de bytes de control
 # es basura total; un 10 % de letras sueltas es un corpus sano (el corpus real mide 3-9 %).
 # Sin la normalizacion, la firma de los bytes de control —la que destapo sanguinetti— quedaba
@@ -262,9 +340,27 @@ REFERENCIA_CONTROL = 0.10
 REFERENCIA_REEMPLAZO = 0.05
 REFERENCIA_CID = 0.10
 # Las dos firmas historicas se miden en su propia escala (referencia 1,0): asi `dudosa` y
-# `corrupta` caen exactamente donde caian `suspect` y `corrupt`.
+# `corrupta` caen exactamente donde caian `suspect` y `corrupt`. La de letras espaciadas va en la
+# misma escala por la misma razon: es la mitad dura de la de letras sueltas.
 REFERENCIA_LETRAS_SUELTAS = 1.0
 REFERENCIA_SIN_VOCALES = 1.0
+REFERENCIA_ESPACIADAS = 1.0
+
+# LAS TRES CONDICIONES DE UNA CORRIDA ESPACIADA (16-sep-2026). Una corrida es una tira de tokens
+# de UNA sola letra, seguidos. Para que cuente como "el PDF se extrajo caracter a caracter":
+#   · LARGO >= 4. Tres letras sueltas seguidas las produce el español normal ("vitamina A y D") y
+#     tambien las produce una lista de incisos; cuatro ya es deletreo. Es el mismo numero de
+#     tokens que la corrida minima de `RE_TEXTO_ESPACIADO` (2 pares + 1), que resuelve el mismo
+#     problema en los titulos (`_clean_spaced_text`).
+#   · >= 3 LETRAS DISTINTAS. La columna de "x" de una tabla de vacunas —"x x PCV13 Si x x x x x x
+#     x"— es la corrida mas larga de todo el corpus sano y tiene UNA letra distinta.
+#   · MAYORITARIAMENTE MINUSCULA. Los marcadores de panel de una figura ("A B C D V D J C") y los
+#     simbolos de una formula quimica ("N A B O N N O") son MAYUSCULAS; una palabra deletreada,
+#     no. El empate (dos y dos, "A y D e") NO cuenta: se exige mayoria estricta.
+# Las tres salieron de los cinco falsos positivos del dry-run del 16-sep y del caso verdadero del
+# 29-jul ("l a i n s u f i c i e n c i a c a r d i a c a"), que las cumple las tres.
+MIN_CORRIDA_ESPACIADA = 4
+MIN_LETRAS_DISTINTAS_ESPACIADA = 3
 
 # LA PROPORCION NO ALFABETICA, con piso. Una tabla de dosis es legitimamente no alfabetica
 # —"Ceftriaxona 50-75 Ceftazidima 150" mide 0,30— y marcarla degradada fue justo el falso
@@ -290,11 +386,60 @@ MAX_CHARS_ENCABEZADO = 60          # mas largo que esto no es un nombre de colum
 MIN_RATIO_LETRAS_ENCABEZADO = 0.5  # ver _parece_encabezado
 MAX_PERDIDA_TOKENS = 0.02          # ver _pierde_contenido
 
+# CUANTO PUEDE PERDER UNA TABLA ANTES DE QUE NO SEA UNA TABLA (16-sep-2026, tanda 6, §4.6 del
+# diseño nomos/knowledge/DISENO-uso-real-16sep.md). Es la valvula POR TABLA: ver
+# `_pierde_la_tabla` y `extraer_texto_pagina`.
+#
+# SE MIDE EN PALABRAS DISTINTAS, no en ocurrencias, y esa es la diferencia con la guarda de
+# pagina. Motivo medido: PRONAP sobreimprime los recuadros destacados —el mismo parrafo escrito
+# DOS VECES dentro del mismo bloque de PyMuPDF, ni siquiera en dos bloques— y la grilla lo
+# rinde una sola vez. Contando ocurrencias, 33 de las 105 tablas del libro "perdian" exactamente
+# 0,500 y se descartaban; contando palabras distintas, pierde UNA sola tabla en todo el libro (la
+# p. 160, donde `find_tables` agarro el pie de imprenta y rindio "159."). Lo mismo en Sanguinetti:
+# 8 tablas "perdian" por ocurrencias y 3 por palabras distintas.
+#
+# EL NUMERO. Entre 0,05 y 0,30 los dos libros dan el MISMO resultado (una tabla descartada cada
+# uno), asi que el umbral se pone en el medio. Por debajo de 0,05 empieza a morder tablas sanas
+# a las que la grilla les dejo afuera el rotulo de una columna (Sanguinetti p. 61 pierde
+# "diastolica", 0,036; p. 142 pierde "h2o", 0,042): perder una palabra de un encabezado y ganar
+# la estructura de ocho filas es un buen canje, y la palabra sigue en el chunk vecino.
+MAX_PERDIDA_TABLA = 0.10
+
 
 def normalize_for_search(text: str) -> str:
     """Quita acentos y pasa a minúsculas para full-text search."""
     nfkd = unicodedata.normalize('NFKD', text)
     return ''.join(c for c in nfkd if not unicodedata.combining(c)).lower()
+
+
+def quitar_folio(texto: str, borde: int = LINEAS_DE_BORDE) -> str:
+    """Saca el número de página suelto, y SÓLO si está en un borde de la página.
+
+    A lo sumo UNA línea de dígitos por borde: se miran las `borde` primeras líneas no vacías y
+    las `borde` últimas, y en cada zona sale la primera que sea sólo dígitos. Ver
+    `FOLIO_SUELTO` arriba para el porqué (16-sep-2026, §4.6 del diseño de uso real): la regla
+    vieja borraba cualquier línea de 1-4 dígitos de cualquier parte de la página y se comía las
+    celdas numéricas de las tablas, que PyMuPDF emite una por renglón.
+
+    Es PURA y recibe el texto de UNA página: el borde es el de esa página, no el del documento.
+    El `borde` es parámetro para poder medirlo en un test sin tocar la constante del módulo.
+    """
+    lineas = texto.split('\n')
+    no_vacias = [i for i, linea in enumerate(lineas) if linea.strip()]
+    if not no_vacias:
+        return texto
+    # La zona de abajo se recorre de afuera hacia adentro: el folio del pie es la ÚLTIMA línea
+    # antes que la anteúltima, igual que el del encabezado es la primera antes que la segunda.
+    # Y NO SE SOLAPAN: en una página de pocas líneas las dos zonas comparten renglones, y sin
+    # esto una página que empieza con dos números —una columna de tabla— los perdía los dos.
+    arriba = no_vacias[:borde]
+    abajo = [i for i in no_vacias[-borde:] if i not in set(arriba)]
+    for zona in (arriba, abajo[::-1]):
+        for i in zona:
+            if FOLIO_SUELTO.match(lineas[i]):
+                lineas[i] = ''
+                break   # a lo sumo una por borde: la de al lado ya es contenido
+    return '\n'.join(lineas)
 
 
 def clean_text(text: str) -> str:
@@ -314,12 +459,14 @@ def clean_text(text: str) -> str:
         que se escribe un aviso. Sin un solo nombre propio, así que vale para cualquier libro
         de cualquier editorial y no hay que tocar el código cuando entra un libro nuevo.
 
-    La línea de número de página suelto y la del encabezado de tratado ("… medicina interna …
-    edición …") quedan como estaban: son las de siempre y sacarlas cambiaría el parseo sobre
-    texto que no es un encabezado repetido, que es justo lo que esta tanda no toca.
+    EL FOLIO SE ACOTÓ AL BORDE el 16-sep-2026 (tanda 6, §4.6 del diseño de uso real): ver
+    `FOLIO_SUELTO` y `quitar_folio`. Antes era un `re.sub` con `re.MULTILINE` sobre la página
+    entera y borraba las celdas numéricas de las tablas. El encabezado de tratado ("… medicina
+    interna … edición …") queda como estaba: es de las de siempre y sacarlo cambiaría el
+    parseo sobre texto que no es un encabezado repetido, que es justo lo que esta tanda no toca.
     """
     text = re.sub(r'\n{3,}', '\n\n', text)
-    text = re.sub(r'^\s*\d{1,4}\s*$', '', text, flags=re.MULTILINE)
+    text = quitar_folio(text)
     text = re.sub(r'(?i)^.*medicina interna.*edici[oó]n.*$', '', text, flags=re.MULTILINE)
     text = AVISO_DE_DERECHOS.sub('', text)
     text = re.sub(r'[ \t]+', ' ', text)
@@ -519,8 +666,27 @@ def _tokens(texto: str) -> Counter:
     return Counter(re.findall(r'\w{2,}', texto.lower()))
 
 
+def _palabras_perdidas(viejo: str, nuevo: str) -> float:
+    """Fraccion de PALABRAS DISTINTAS de `viejo` que no aparecen en `nuevo`. 0 si no hay texto.
+
+    POR QUE DISTINTAS Y NO OCURRENCIAS (16-sep-2026, tanda 6, §4.6 del diseño de uso real).
+    Hasta hoy se contaban ocurrencias, y eso hacia que el texto SOBREIMPRESO —el mismo parrafo
+    escrito dos veces, que PyMuPDF devuelve dos veces y la grilla rinde una— se leyera como
+    perdida. Medido en PRONAP neurodesarrollo: de las 74 paginas con reconstruccion aceptada,
+    53 quedaban vetadas por ocurrencias (hasta 0,168 de "perdida") y NINGUNA perdia una sola
+    palabra distinta —`faltan=[]` en las 53—. Contando palabras distintas, la guarda sigue
+    cazando lo que vino a cazar (la pagina de prosa a dos columnas que `find_tables` cree
+    grilla y deja en un renglon: ahi faltan casi todas las palabras) y deja de castigar una
+    maqueta que repite tinta.
+    """
+    tenia = set(_tokens(viejo))
+    if not tenia:
+        return 0.0
+    return len(tenia - set(_tokens(nuevo))) / len(tenia)
+
+
 def _pierde_contenido(viejo: str, nuevo: str) -> bool:
-    """La reconstruccion se comio texto que get_text() si traia?
+    """La reconstruccion se comio texto que get_text() si traia? (guarda de PAGINA)
 
     find_tables() a veces marca como tabla una region que en realidad es prosa
     maquetada en columnas. Al excluir los bloques de esa region y reemplazarlos
@@ -529,49 +695,133 @@ def _pierde_contenido(viejo: str, nuevo: str) -> bool:
     quedaba en 193.
 
     Perder texto es peor que aplanarlo, asi que ante cualquier perdida se vuelve
-    a get_text(). El cambio solo puede agregar estructura, nunca sacar contenido.
+    al texto plano. El cambio solo puede agregar estructura, nunca sacar contenido.
+
+    DESDE EL 16-sep-2026 ES EL ULTIMO RECURSO, no la unica valvula: la perdida se evalua
+    primero POR TABLA (`_pierde_la_tabla`) y esta guarda cubre lo que esa medicion no ve —el
+    bloque que solapaba dos cajas y quedo huerfano, el reordenamiento por `y0`—. Ver
+    `extraer_texto_pagina`.
     """
-    faltan = _tokens(viejo) - _tokens(nuevo)
-    total = sum(_tokens(viejo).values())
-    return total > 0 and sum(faltan.values()) / total > MAX_PERDIDA_TOKENS
+    return _palabras_perdidas(viejo, nuevo) > MAX_PERDIDA_TOKENS
 
 
-def extraer_texto_pagina(page) -> str:
-    """Texto de la pagina con las tablas reconstruidas en su lugar de lectura."""
+def _pierde_la_tabla(dentro: str, render: str) -> bool:
+    """La grilla dejo afuera palabras que el PDF si tenia dentro de la caja de la tabla?
+
+    LA VALVULA POR TABLA (16-sep-2026, §4.6 del diseño de uso real). Mide lo mismo que
+    `_pierde_contenido` pero contra su propio umbral: el de la pagina esta calibrado sobre
+    miles de palabras y el de una tabla, sobre decenas, donde el 2 % es UNA palabra. Ver
+    `MAX_PERDIDA_TABLA`.
+    """
+    return _palabras_perdidas(dentro, render) > MAX_PERDIDA_TABLA
+
+
+def _bloques_de_texto(page) -> list:
+    """Los bloques de la pagina como [(Rect, texto)], en el orden que los da PyMuPDF.
+
+    Se leen UNA sola vez y se usan para las dos cosas: medir la perdida de cada tabla y
+    armar la pagina. `get_text("blocks")` devuelve (x0, y0, x1, y1, texto, nro, tipo).
+    """
     import fitz  # PyMuPDF: perezoso, le costaba ~10 s al arranque en frio de Cloud Run
+    return [(fitz.Rect(b[:4]), b[4], (b[6] if len(b) > 6 else 0)) for b in page.get_text("blocks")]
+
+
+def _texto_de_la_caja(bloques: list, caja) -> str:
+    """El texto que el PDF trae DENTRO de la caja de una tabla: contra esto se mide la perdida.
+
+    DOS FILTROS, y los dos se pagaron midiendo (16-sep-2026):
+
+      · SOLO BLOQUES DE TEXTO (tipo 0). La descripcion que PyMuPDF emite por un bloque de
+        imagen ("<image: DeviceRGB, width ...>") aporta tokens que ninguna grilla puede tener:
+        una figura dentro de la caja haria "perder" a una tabla sana.
+      · SIN BLOQUES REPETIDOS. PyMuPDF emite DOS VECES el mismo bloque -misma caja, mismo
+        texto- cuando el PDF sobreimprime el parrafo (los recuadros destacados de PRONAP lo
+        hacen en todo el modulo de vacunas). La tabla lo rinde UNA vez, asi que sin deduplicar
+        toda esa familia media exactamente 0,500 de perdida y se descartaba entera. El armado
+        de la pagina NO deduplica a proposito: `page.get_text()` tambien trae el bloque dos
+        veces, y sacar uno de los dos haria que la guarda de pagina viera una perdida que no
+        existe.
+    """
+    vistos = set()
+    piezas = []
+    for rect, texto, tipo in bloques:
+        if tipo != 0 or not _dentro_de_alguna(rect, [caja]):
+            continue
+        clave = (round(rect.y0, 1), round(rect.x0, 1), texto)
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        piezas.append(texto)
+    return "\n".join(piezas)
+
+
+def extraer_texto_pagina(page, decodificador=None) -> str:
+    """Texto de la pagina con las tablas reconstruidas en su lugar de lectura.
+
+    `decodificador` es opcional y lo arma `parse_pdf_v2` UNA vez por libro
+    (`pipeline/decodificacion.py`, tanda 6, 16-sep-2026): cuando el PDF trae el mapeo de glifos
+    roto, reemplaza los spans ilegibles por su version decodificada DESPUES de armar la pagina,
+    asi la reconstruccion de tablas y el orden de lectura no cambian. Sin el —el caso normal—
+    esta funcion hace exactamente lo de siempre.
+
+    LA VALVULA DESCARTA LA TABLA QUE PIERDE, NO LA PAGINA (16-sep-2026, tanda 6 del diseño
+    nomos/knowledge/DISENO-uso-real-16sep.md, §4.6 y la bitacora "Experimento de T6").
+
+    QUE SE ROMPIO. La guarda `_pierde_contenido` se evaluaba UNA sola vez, sobre la pagina
+    entera: si la reconstruccion completa perdia mas de `MAX_PERDIDA_TOKENS`, se tiraba TODA la
+    reconstruccion y la pagina volvia a texto plano. Y alcanza UNA tabla espuria —una region de
+    prosa a dos columnas que `find_tables()` cree grilla y que rinde una sola linea— para que
+    la pagina entera pierda sus tablas buenas. Medido en PRONAP neurodesarrollo (162 pags): 83
+    paginas con tabla detectada, 75 con render util y 54 de esas 75 (el 72 %) terminaban
+    PLANAS. El caso del informe de uso real es la p. 28, la continuacion de la tabla de pautas
+    del PRUNAPE: la grilla de 24x4 sale entera, pero una segunda "tabla" de 4x5 que es un
+    recuadro de texto arrastraba a las dos al piso.
+
+    LA CURA. La perdida se mide POR TABLA: el texto de los bloques que caen dentro de la caja
+    contra las filas que esa tabla rindio. La tabla que pierde se descarta —sus bloques quedan
+    planos, en su lugar de lectura— y las demas se conservan. La guarda de PAGINA queda como
+    ULTIMO RECURSO al final: cubre lo que la medicion por tabla no ve (el bloque que queda
+    huerfano porque solapaba dos cajas, el reordenamiento por `y0`).
+    """
+    def salida(texto):
+        return decodificador.aplicar(page, texto) if decodificador is not None else texto
+
     plano = page.get_text()
     try:
         detectadas = list(page.find_tables().tables)
     except Exception:
-        return plano
+        return salida(plano)
 
     if not detectadas:
-        return plano
+        return salida(plano)
+
+    import fitz  # PyMuPDF: perezoso, le costaba ~10 s al arranque en frio de Cloud Run
+    bloques = _bloques_de_texto(page)
 
     reconstruidas = []
     for t in detectadas:
         texto = render_tabla(t)
-        if texto:
-            reconstruidas.append((fitz.Rect(t.bbox), texto))
+        if not texto:
+            continue
+        caja = fitz.Rect(t.bbox)
+        if _pierde_la_tabla(_texto_de_la_caja(bloques, caja), texto):
+            continue
+        reconstruidas.append((caja, texto))
 
     if not reconstruidas:
-        return plano
+        return salida(plano)
 
     # La prosa se toma por bloques para poder descartar los que son la tabla — si
     # no, el contenido quedaria duplicado: una vez aplanado y otra reconstruido.
     cajas = [caja for caja, _ in reconstruidas]
-    piezas = []
-    for b in page.get_text("blocks"):
-        rect = fitz.Rect(b[:4])
-        if _dentro_de_alguna(rect, cajas):
-            continue
-        piezas.append((rect.y0, rect.x0, b[4]))
+    piezas = [(rect.y0, rect.x0, txt) for rect, txt, _ in bloques
+              if not _dentro_de_alguna(rect, cajas)]
 
     piezas.extend((caja.y0, caja.x0, texto) for caja, texto in reconstruidas)
     piezas.sort(key=lambda p: (round(p[0], 1), p[1]))
     armado = "\n".join(p[2] for p in piezas)
 
-    return plano if _pierde_contenido(plano, armado) else armado
+    return salida(plano if _pierde_contenido(plano, armado) else armado)
 
 
 def _cerca_de_un_borde(page_start, total_pages) -> bool:
@@ -732,6 +982,45 @@ def ratio_letras_sueltas(text: str) -> float:
     return sum(1 for t in tokens if len(t) == 1 and t.isalpha()) / len(tokens)
 
 
+def ratio_letras_espaciadas(text: str) -> float:
+    """Fraccion de tokens que estan en una CORRIDA de letras sueltas que deletrea una palabra.
+
+    LA MITAD DURA DE `ratio_letras_sueltas` (16-sep-2026, dry-run contra el grafo vivo; ver
+    `FIRMAS_DURAS`). Sintoma que caza: el PDF extraido caracter a caracter —"l a i n s u f i c
+    i e n c i a", "e v e n l ar g e v ess els"— que el 29-jul-2026 destapo
+    diagnostic-pathology-gynecological-3ed con 63,7 % de tokens de una letra.
+
+    Lo que NO caza, y por eso existe separada de las letras sueltas: los marcadores A/B/C de un
+    epigrafe de figura, la columna de "x" de una tabla de vacunas y los simbolos sueltos de una
+    formula quimica. Las tres condiciones de la corrida —largo, letras distintas y minusculas—
+    y su porque estan en `MIN_CORRIDA_ESPACIADA`.
+    """
+    tokens = re.findall(r"\S+", text)
+    if len(tokens) < MIN_TOKENS_CALIDAD:
+        return 0.0
+
+    def es_letra(token: str) -> bool:
+        return len(token) == 1 and token.isalpha()
+
+    def cuenta(corrida: list) -> bool:
+        if len(corrida) < MIN_CORRIDA_ESPACIADA:
+            return False
+        if len({c.lower() for c in corrida}) < MIN_LETRAS_DISTINTAS_ESPACIADA:
+            return False
+        return sum(1 for c in corrida if c.islower()) * 2 > len(corrida)
+
+    espaciados = 0
+    corrida = []
+    for token in tokens + [""]:      # el centinela cierra la ultima corrida
+        if es_letra(token):
+            corrida.append(token)
+            continue
+        if cuenta(corrida):
+            espaciados += len(corrida)
+        corrida = []
+    return espaciados / len(tokens)
+
+
 def ratio_no_alfabetico(text: str) -> float:
     """Fraccion de caracteres visibles que no son letras (digitos, simbolos, puntuacion)."""
     visibles = [c for c in text if not c.isspace()]
@@ -754,12 +1043,16 @@ def _escalar(ratio: float, referencia: float, piso: float = 0.0) -> float:
 
 
 def firmas_de_calidad(text: str) -> dict:
-    """Las seis firmas, ya NORMALIZADAS a una escala comun (0-1). Ver los umbrales arriba.
+    """Las siete firmas, ya NORMALIZADAS a una escala comun (0-1). Ver los umbrales arriba.
 
     Se devuelven todas —y no solo la peor— porque el diagnostico necesita saber CUAL disparo:
     un chunk 'corrupta' por bytes de control se cura re-ingestando el PDF con OCR, y uno
-    'corrupta' por letras sueltas, re-extrayendo con otro extractor. Es la misma razon por la
+    'corrupta' por letras espaciadas, re-extrayendo con otro extractor. Es la misma razon por la
     que `admin-unit/v1` publica el estado del embedding y no un booleano.
+
+    CINCO SON DURAS Y DOS BLANDAS (`FIRMAS_DURAS` / `FIRMAS_BLANDAS`, 16-sep-2026): las blandas
+    solas no alcanzan para decir `corrupta`. Esta funcion no lo aplica —devuelve la medicion
+    cruda—; lo aplica `calidad_de_texto`, que es quien pone la etiqueta.
     """
     largo = max(len(text), 1)
     tokens = max(len(re.findall(r"\S+", text)), 1)
@@ -768,6 +1061,7 @@ def firmas_de_calidad(text: str) -> dict:
         "reemplazo": _escalar(text.count(CARACTER_DE_REEMPLAZO) / largo, REFERENCIA_REEMPLAZO),
         "cid": _escalar(len(CID_LITERAL.findall(text)) / tokens, REFERENCIA_CID),
         "letras_sueltas": _escalar(ratio_letras_sueltas(text), REFERENCIA_LETRAS_SUELTAS),
+        "espaciadas": _escalar(ratio_letras_espaciadas(text), REFERENCIA_ESPACIADAS),
         "sin_vocales": _escalar(ratio_palabras_sin_vocales(text), REFERENCIA_SIN_VOCALES),
         "no_alfabetico": _escalar(ratio_no_alfabetico(text), REFERENCIA_NO_ALFABETICO,
                                   PISO_NO_ALFABETICO),
@@ -778,17 +1072,25 @@ def calidad_de_texto(text: str) -> tuple:
     """(etiqueta, valor) de la calidad de UN chunk: `ok` | `dudosa` | `corrupta` y 0-1.
 
     El valor es la PEOR de las firmas (`firmas_de_calidad`), ya normalizadas para que se
-    puedan comparar entre si, y la etiqueta sale de los dos umbrales con nombre. Es pura:
-    recibe texto y devuelve una tupla — sin grafo, sin red y sin el libro al que pertenece el
-    chunk, que es lo que permite correrla en el parseo y otra vez en un backfill.
+    puedan comparar entre si. Es pura: recibe texto y devuelve una tupla — sin grafo, sin red y
+    sin el libro al que pertenece el chunk, que es lo que permite correrla en el parseo y otra
+    vez en un backfill.
+
+    `CORRUPTA` PIDE UNA FIRMA DURA (16-sep-2026, dry-run contra el grafo vivo; ver
+    `FIRMAS_DURAS` arriba para la medicion). Las dos firmas blandas —letras sueltas y
+    proporcion no alfabetica— describen una tabla numerica o un epigrafe de figura igual de
+    bien que un texto roto, asi que solas techan en `dudosa`. Para decir `corrupta` tiene que
+    cruzar el umbral una firma que signifique "la decodificacion fallo".
 
     MARCA, NO FRENA: ningun llamador de esta funcion excluye nada del corpus por lo que
     devuelva. La etiqueta viaja hasta el resultado para que quien lee sepa que tiene delante.
     """
     if not text or not text.strip():
         return ("ok", 0.0)
-    valor = max(firmas_de_calidad(text).values())
-    if valor > UMBRAL_CALIDAD_CORRUPTA:
+    firmas = firmas_de_calidad(text)
+    valor = max(firmas.values())
+    dura = max(firmas[nombre] for nombre in FIRMAS_DURAS)
+    if valor > UMBRAL_CALIDAD_CORRUPTA and dura > UMBRAL_CALIDAD_CORRUPTA:
         return ("corrupta", round(valor, 3))
     if valor > UMBRAL_CALIDAD_DUDOSA:
         return ("dudosa", round(valor, 3))
@@ -1169,15 +1471,30 @@ def parse_pdf_v2(pdf_path: str, libro_id: str, estrategia: Estrategia = POR_DEFE
         (children, parents) — listas de dicts
     """
     import fitz  # PyMuPDF: perezoso, le costaba ~10 s al arranque en frio de Cloud Run
+
+    # EL MAPEO DE GLIFOS ROTO, ANTES DE LEER NINGUNA PAGINA (tanda 6, 16-sep-2026; §4.6 del
+    # diseño de uso real). Hay PDF cuyo texto sale ilegible aunque el texto este ahi porque la
+    # fuente embebida no trae con que traducir sus glifos. `decodificacion.resolver` mira el
+    # documento COMPLETO —la clave se deduce del propio PDF: las palabras de su texto sano— y
+    # devuelve None cuando no hay nada roto o cuando no llega a la confianza con nombre, que es
+    # el caso normal y deja el parseo exactamente como estaba. Se importa aca adentro por la
+    # misma razon que `fitz`: el modulo arrastra el arranque si se carga siempre.
+    from pipeline import decodificacion
+
     doc = fitz.open(pdf_path)
     total_pages = doc.page_count
     log.info(f"  Parseando {os.path.basename(pdf_path)} ({total_pages} págs)...")
+
+    decodificador = decodificacion.resolver(doc, libro_id)
+    if decodificador is not None:
+        log.info("  %d fuente(s) con el mapeo roto, decodificadas por forma",
+                 len(decodificador.tablas))
 
     # Extraer texto por página
     pages = []
     for i in range(total_pages):
         page = doc[i]
-        text = extraer_texto_pagina(page)
+        text = extraer_texto_pagina(page, decodificador)
         text = clean_text(text)
 
         if len(text.strip()) > 20:

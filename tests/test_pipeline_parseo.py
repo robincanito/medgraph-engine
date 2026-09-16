@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from pipeline import embeddings, parseo
+from pipeline import decodificacion, embeddings, parseo
 
 RAIZ = Path(__file__).resolve().parent.parent
 
@@ -730,3 +730,247 @@ class TestElContratoChunkV1:
             pytest.skip("nomos-contracts no esta en este disco")
         assert (RAIZ / "tests" / "contracts" / "chunk.schema.json").read_text(encoding="utf-8") == \
             fuente.read_text(encoding="utf-8")
+
+
+# ══════════════════════════════════════════════════════════════════════════════════
+# TANDA 6 (16-sep-2026): el folio acotado al borde, la valvula por tabla, la firma de
+# letras espaciadas y el decodificador de mapeos rotos.
+#
+# El texto de estos tests es INVENTADO, como el del resto de la suite: ningun libro entra
+# a este repo. La FORMA del cifrado si es la medida en el corpus real —el corrimiento
+# reproduce el orden de glifos estandar (el espacio en \x03, la "a" en "D") y la
+# sustitucion, el orden de subset de un CFF (codigos de control por primer uso)—.
+# ══════════════════════════════════════════════════════════════════════════════════
+
+PROSA_INVENTADA = (
+    "La revision periodica del equipo exige una lista de control escrita y firmada por el "
+    "responsable del turno. Cada punto de la lista describe una condicion observable y el "
+    "valor esperado, de modo que dos personas distintas lleguen al mismo resultado. Cuando "
+    "una condicion no se cumple se anota la desviacion, se estima el riesgo y se decide si "
+    "el equipo puede seguir en servicio hasta la proxima parada programada. El registro se "
+    "conserva durante cinco anos y se revisa en cada auditoria interna de la planta. "
+    "La formacion del personal es la segunda mitad del sistema: sin una practica anual "
+    "documentada, la lista se llena por costumbre y deja de describir el estado real. "
+    "El procedimiento define un examen breve y una demostracion practica para cada tarea. "
+)
+
+
+class TestElFolioEsDelBorde:
+    """La regla del numero de pagina dejo de comerse las celdas de las tablas.
+
+    La regla vieja borraba CUALQUIER linea de 1 a 4 digitos, y PyMuPDF emite cada celda de
+    una tabla en su propio renglon: toda celda numerica corta sin separador desaparecia.
+    Ahora sale a lo sumo UNA linea de digitos por borde (`LINEAS_DE_BORDE` lineas no vacias
+    arriba y abajo).
+    """
+
+    TABLA_POR_RENGLONES = ("Repuesto\nCantidad\nIntervalo\nUnidad\n"
+                           "Reten\n15\n12-24\nmeses\n"
+                           "Rodamiento\n40\n8\nmeses\n")
+
+    def test_una_celda_numerica_del_medio_sobrevive(self):
+        limpio = parseo.clean_text("Tabla de repuestos\n" + self.TABLA_POR_RENGLONES + "Fin.")
+        renglones = limpio.split("\n")
+        assert "15" in renglones and "40" in renglones, limpio
+
+    def test_el_folio_detras_del_titulo_corrido_se_va(self):
+        pagina = "Manual de la planta - capitulo 3\n12\nEl cuerpo de la pagina empieza aca.\n"
+        assert "12" not in parseo.clean_text(pagina).split("\n")
+
+    def test_el_folio_del_pie_tambien(self):
+        assert "45" not in parseo.clean_text("Cuerpo.\nPie del manual\n45\n").split("\n")
+
+    def test_a_lo_sumo_uno_por_borde(self):
+        assert "30" in parseo.clean_text("15\n30\nCuerpo de la pagina.\n").split("\n")
+
+    def test_quitar_folio_es_puro(self):
+        assert "7" in parseo.quitar_folio("Titulo\n7\nCuerpo", borde=1).split("\n")
+        assert "7" not in parseo.quitar_folio("Titulo\n7\nCuerpo", borde=2).split("\n")
+
+
+class _TablaDoble:
+    def __init__(self, bbox, filas):
+        self.bbox = bbox
+        self._filas = filas
+
+    def extract(self):
+        return self._filas
+
+
+class _PaginaDoble:
+    def __init__(self, plano, bloques, tablas):
+        self.number = 0
+        self._plano = plano
+        self._bloques = bloques
+        self._tablas = tablas
+
+    def get_text(self, modo="text"):
+        if modo == "blocks":
+            return [(*bloque, i, 0) for i, bloque in enumerate(self._bloques)]
+        return self._plano
+
+    def find_tables(self):
+        return type("Resultado", (), {"tables": self._tablas})()
+
+
+class TestLaValvulaPorTabla:
+    """La perdida se evalua POR TABLA y no por pagina: una region de prosa que `find_tables`
+    cree grilla ya no arrastra al piso a las tablas buenas de la misma pagina."""
+
+    ESPURIO = ("El retraso en el cumplimiento de una tarea puede deberse a la variacion normal "
+               "del proceso, y por eso conviene repetir la medicion antes de intervenir el "
+               "equipo o de cambiar el punto de ajuste del controlador principal.")
+
+    def _pagina(self):
+        buena = _TablaDoble((0, 100, 200, 200),
+                            [["Repuesto", "Cantidad"], ["Reten", "15 u"], ["Rodamiento", "40 u"]])
+        espuria = _TablaDoble((0, 300, 200, 400),
+                              [[self.ESPURIO[:40], None], [None, ""], ["", None]])
+        bloques = [(0, 100, 200, 200, "Repuesto Cantidad\nReten 15 u\nRodamiento 40 u"),
+                   (0, 300, 200, 400, self.ESPURIO)]
+        plano = "Repuesto Cantidad\nReten 15 u\nRodamiento 40 u\n" + self.ESPURIO
+        return _PaginaDoble(plano, bloques, [buena, espuria])
+
+    def test_la_buena_se_reconstruye_y_la_que_pierde_vuelve_a_plano(self):
+        salida = parseo.extraer_texto_pagina(self._pagina())
+        assert "Reten (Repuesto)" in salida, salida
+        assert self.ESPURIO in salida, salida
+
+    def test_el_texto_sobreimpreso_no_es_perdida(self):
+        """El PDF escribe el mismo parrafo DOS veces y la grilla lo rinde una: contando
+        ocurrencias eso era un 50 % de perdida; contando palabras distintas es cero."""
+        doble = self.ESPURIO + "\n" + self.ESPURIO
+        assert parseo._palabras_perdidas(doble, self.ESPURIO) == 0.0
+        assert not parseo._pierde_la_tabla(doble, self.ESPURIO)
+
+    def test_una_tabla_que_se_come_el_parrafo_si_pierde(self):
+        assert parseo._pierde_la_tabla(self.ESPURIO, self.ESPURIO[:40])
+
+    def test_los_dos_umbrales_son_distintos(self):
+        assert parseo.MAX_PERDIDA_TOKENS == 0.02 and parseo.MAX_PERDIDA_TABLA == 0.10
+
+
+class TestCorruptaPideUnaFirmaDura:
+    """Las dos firmas BLANDAS —letras sueltas y proporcion no alfabetica— describen igual de
+    bien una tabla numerica que un texto roto, asi que solas techan en `dudosa`."""
+
+    TABLA_DE_CRUCES = ("x x FVA13 Si x x x x x x x MenFIC Si x x x x x x x HPX Si x x x x "
+                       "x x DTPz Si x x x x x x x VPX Si x x x x")
+    EPIGRAFE = ("RSS Formacion de horquilla de extremos y eliminacion del segmento intercalado, "
+                "incluyendo las dos RSS Escision a nivel de las RSS A B C D V D J C A B C D")
+    ESPACIADO = " ".join("l a r e v i s i o n d e l e q u i p o e s a n u a l".split()) * 8
+
+    def test_la_tabla_de_cruces_no_es_corrupta(self):
+        firmas = parseo.firmas_de_calidad(self.TABLA_DE_CRUCES)
+        assert max(firmas[f] for f in parseo.FIRMAS_DURAS) == 0.0
+        assert parseo.calidad_de_texto(self.TABLA_DE_CRUCES)[0] == "dudosa"
+
+    def test_el_epigrafe_de_figura_tampoco(self):
+        assert parseo.calidad_de_texto(self.EPIGRAFE)[0] in ("ok", "dudosa")
+        assert parseo.ratio_letras_espaciadas(self.EPIGRAFE) == 0.0
+
+    def test_el_texto_espaciado_si(self):
+        """La mitad que no se puede perder: el PDF extraido caracter a caracter."""
+        assert parseo.firmas_de_calidad(self.ESPACIADO)["espaciadas"] > 0
+        assert parseo.calidad_de_texto(self.ESPACIADO)[0] == "corrupta"
+
+    def test_las_dos_listas_cubren_todas_las_firmas(self):
+        firmas = set(parseo.firmas_de_calidad("cualquier texto de prueba"))
+        assert firmas == set(parseo.FIRMAS_DURAS) | set(parseo.FIRMAS_BLANDAS)
+
+
+class TestElDecodificadorDeMapeosRotos:
+    """`pipeline/decodificacion.py`: el texto de un PDF cuyos glifos no se pueden traducir se
+    recupera con la clave deducida del PROPIO documento. Cifrado sintetico, texto inventado."""
+
+    CORRIMIENTO = 29
+    ACENTOS = {"a": chr(105), "e": chr(112), "i": chr(116), "o": chr(121), "u": chr(126)}
+
+    @staticmethod
+    def _corrimiento(texto):
+        return "".join(chr(ord(c) - TestElDecodificadorDeMapeosRotos.CORRIMIENTO)
+                       if 32 <= ord(c) <= 126 else c for c in texto)
+
+    @staticmethod
+    def _sustitucion(texto):
+        tabla, siguiente = {}, 2
+        for c in texto:
+            if c not in tabla:
+                tabla[c] = chr(siguiente)
+                siguiente += 1
+        return tabla, "".join(tabla[c] for c in texto)
+
+    @staticmethod
+    def _spans(texto, largo=90):
+        return [texto[i:i + largo] for i in range(0, len(texto), largo)]
+
+    @property
+    def lexico(self):
+        return decodificacion.construir_lexico([PROSA_INVENTADA])
+
+    def test_recupera_un_corrimiento_constante(self):
+        cifrado = self._corrimiento(PROSA_INVENTADA * 6)
+        salida = decodificacion.resolver_fuente(self._spans(cifrado), self.lexico)
+        assert salida["metodo"] == "corrimiento" and salida["k"] == self.CORRIMIENTO
+        assert salida["confianza"] >= decodificacion.UMBRAL_CONFIANZA, salida
+        decodificado = decodificacion.aplicar_tabla(cifrado, salida["tabla"])
+        assert "La revision periodica del equipo" in decodificado
+
+    def test_recupera_una_sustitucion_sin_corrimiento_posible(self):
+        _, cifrado = self._sustitucion(PROSA_INVENTADA * 6)
+        salida = decodificacion.resolver_fuente(self._spans(cifrado), self.lexico)
+        assert salida["metodo"] == "sustitucion" and salida["k"] is None
+        assert salida["confianza"] >= decodificacion.UMBRAL_CONFIANZA, salida
+        assert "revision" in decodificacion.aplicar_tabla(cifrado, salida["tabla"])
+
+    def test_la_prosa_sana_no_se_toca(self):
+        """La puerta por span: una misma fuente puede traer spans rotos y spans sanos."""
+        cifrado = self._corrimiento(PROSA_INVENTADA * 6)
+        salida = decodificacion.resolver_fuente(self._spans(cifrado), self.lexico)
+        deco = decodificacion.Decodificador({"F": salida["tabla"]}, self.lexico, {0}, [])
+        for sano in self._spans(PROSA_INVENTADA)[:8]:
+            assert deco.decodificar_span("F", sano) is None, repr(sano[:50])
+
+    def test_lo_que_no_se_puede_resolver_queda_como_esta_y_la_calidad_lo_marca(self):
+        ruido = " ".join("qxzkvw" + str(i % 7) for i in range(4000))
+        _, cifrado = self._sustitucion(ruido)
+        salida = decodificacion.resolver_fuente(self._spans(cifrado), self.lexico)
+        assert salida["confianza"] < decodificacion.UMBRAL_CONFIANZA
+        assert parseo.calidad_de_texto(cifrado[:2000])[0] == "corrupta"
+
+    def test_el_espacio_que_python_llama_espacio_no_lo_es(self):
+        """`str.isspace()` dice True para \\x0b, \\x0c y \\x1c-\\x1f, y en estos PDF esos codigos
+        son glifos (el parentesis, los dos puntos). Al reves, \\t y \\n pueden ser glifos."""
+        for codigo in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x1f", "\t", "\n"):
+            assert not decodificacion.es_espacio(codigo)
+        assert decodificacion.es_espacio(" ")
+
+    def test_un_documento_sano_no_paga_la_pasada_cara(self):
+        class DocDoble:
+            page_count = 3
+
+            def __init__(self):
+                self.modos = []
+
+            def __getitem__(self, i):
+                doc = self
+
+                class P:
+                    number = i
+
+                    def get_text(self, modo="text"):
+                        doc.modos.append(modo)
+                        return PROSA_INVENTADA
+
+                return P()
+
+        doc = DocDoble()
+        assert decodificacion.resolver(doc, "qa-sano") is None
+        assert set(doc.modos) == {"text"}
+
+    def test_la_copia_del_modulo_es_la_del_repo_privado_si_esta(self):
+        privado = RAIZ.parent / "medgraph" / "pipeline" / "decodificacion.py"
+        if not privado.exists():
+            pytest.skip("el repo privado no esta en este disco")
+        assert (RAIZ / "pipeline" / "decodificacion.py").read_text(encoding="utf-8") == \
+            privado.read_text(encoding="utf-8")

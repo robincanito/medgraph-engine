@@ -29,6 +29,16 @@ un campo sin actualizar los oraculos que lo leen.
                 paso in {classify, extract}; estado in {ok, error}. `libro_id` puede ser
                 None: el clasificador corre antes de que el libro exista.
 
+  decodificacion_fuente libro_id, fuente, metodo, k, codigos, confianza, chars, estado
+                metodo in {corrimiento, sustitucion}; estado in {aplicada, descartada}.
+                UNO POR FUENTE TIPOGRAFICA CON EL MAPEO ROTO (16-sep-2026, tanda 6 del diseño
+                de uso real). `pipeline/decodificacion.py` recupera el texto de un PDF cuyos
+                glifos no se pueden traducir, y eso CAMBIA EL TEXTO que entra al corpus: tiene
+                que quedar dicho que fuente se toco, con que metodo (`k` es el corrimiento, o
+                None si fue sustitucion), cuantos codigos resolvio y con que confianza —la
+                fraccion de palabras reconocidas—. `estado=descartada` es el caso en que no
+                llego al umbral: ahi el texto queda como estaba y la calidad lo marca.
+
   extraccion_descarte   libro_id, chunk_id, motivo, tipo?, relacion?, desde_tipo?, hasta_tipo?
                 motivo in {tipo_entidad, tipo_relacion, nombre_corto, nombre_largo, from_to,
                 extremo_ausente}. UNO POR ITEM DESCARTADO (14-sep-2026, decision E). Hasta hoy
