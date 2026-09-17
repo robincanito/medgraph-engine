@@ -276,13 +276,14 @@
         "facets": { "type": "boolean", "description": "La instancia calcula GET /sources/facets: que valores existen en cada campo filtrable, con su conteo. Sin esto, un campo filtrable que no es enum solo se puede filtrar escribiendo el valor exacto. Opcional por retrocompatibilidad: ausente = false." },
         "units": { "type": "boolean", "description": "La instancia expone GET /sources/{id}/units y /sources/{id}/units/{unit_id}: ABRIR una unidad indexable (chunk, articulo) en modo diagnostico, solo lectura. Cierra el circuito de una evaluacion: el numero dice que la consulta trajo el pasaje equivocado, y esta es la pantalla donde se mira POR QUE. Si esta en true, `unit_types` es obligatorio. Opcional por retrocompatibilidad, igual que `facets`: ausente = false." },
         "settings": { "type": "boolean", "description": "La instancia expone /admin/v1/settings: VER (y desde la tanda T3 cambiar) las claves y los modelos con que habla con sus proveedores, sin que el valor de ninguna clave viaje jamas. Si esta en true, `settings_slots` es obligatorio --mismo patron que `units` con `unit_types`--: la consola no puede dibujar una tarjeta de 'Embeddings' adivinando que proveedores acepta esta instancia ni que rompe cambiarlos. Opcional por retrocompatibilidad, igual que `facets`, `units` y `vectorize`: ausente = false, y una instancia que no la publica no queda obligada a explicar nada. Diseño: NOMOS_CONSOLE_BYOK.md (14-sep-2026)." },
+        "mcp": { "type": "boolean", "description": "La instancia sirve su corpus por MCP (`mcp/v1`): las tools de Nomos Graph, en la URL que publica `auth.mcp.url`. Es la unica capacidad que NO es de administracion --lo que habilita no es una pantalla de la consola, sino que una persona conecte este grafo desde su cliente de chat-- y esta aca igual porque la consola tiene que poder MOSTRARLA: la seccion 'MCP' por instancia (URL, estado de OAuth, tools) es lo que le dice a quien administra que ese grafo ya se puede conectar, y sin la capacidad tendria que deducirlo de la presencia de un bloque de `auth`. Si esta en true, `auth.mcp` es obligatorio --mismo patron que `units` con `unit_types`--: publicar la capacidad sin la URL ni la lista de tools seria decir 'se puede conectar' y no decir a donde. Opcional por retrocompatibilidad, igual que `facets`, `units`, `vectorize` y `settings`: ausente = false, y una instancia que no lo sirve (LexGraph al 17-sep-2026) no queda obligada a explicar nada. Contrato de las tools: mcp-v1.md + schemas/mcp-tools.schema.json; diseño: nomos/knowledge/NOMOS_MCP.md §3.6 (tanda M2, 17-sep-2026)." },
         "vectorize": { "type": "boolean", "description": "La instancia expone POST /sources/{id}/vectorize: embeber las unidades que quedaron SIN vector, sin re-ingestar la fuente. Es el boton que necesita el aviso `sin_vector` de job/v1 (13-sep-2026): un job puede terminar en `loaded` con parte del material sin embedding porque el proveedor de embeddings estuvo caido mas de lo que aguantan los reintentos, y mostrar eso sin ofrecer como arreglarlo no es una pantalla de administracion. Re-ingestar seria volver a parsear, volver a cargar y volver a pagar los vectores que ya estaban. Una instancia cuyo corpus no se vectoriza (LexGraph: la norma se cita por lookup exacto) simplemente no publica la clave. Opcional por retrocompatibilidad, igual que `facets` y `units`: ausente = false." }
       }
     },
     "capability_notes": {
       "type": "object",
       "description": "Por que una capacidad esta en false y como se desbloquea. Bloque HERMANO de `capabilities`, no un reemplazo: `capabilities` sigue siendo {nombre: boolean} porque la consola lo lee con `!!` (src/features/fuentes/components/panel-fuente.tsx:170) y un objeto ahi adentro evalua truthy, o sea que una instancia que publico delete:false mostraria el boton de borrar. Obligatorio para CADA capacidad declarada false (allOf, abajo). Una capacidad en true no lleva nota: si funciona, no hay nada que explicar. El texto viaja en el idioma de la instancia, como Error.detail; el que enruta es `kind`, nunca el texto.",
-      "propertyNames": { "enum": ["upload", "classify", "review", "edit", "delete", "reingest", "explore", "wake", "facets", "units", "vectorize", "settings"] },
+      "propertyNames": { "enum": ["upload", "classify", "review", "edit", "delete", "reingest", "explore", "wake", "facets", "units", "vectorize", "settings", "mcp"] },
       "additionalProperties": {
         "type": "object",
         "required": ["kind", "reason", "how_to_unblock"],
@@ -325,7 +326,52 @@
         "issuers": {
           "type": "array",
           "items": { "type": "string", "format": "uri" },
-          "description": "Issuers de Clerk aceptados por esta instancia (uno por entorno). Informativo para la consola: el backend los valida igual."
+          "description": "Issuers de Clerk aceptados por esta instancia (uno por entorno). Informativo para la consola: el backend los valida igual. Es la lista ACEPTADA y no la configurada: publicar un issuer que el backend rechaza seria mandar a autenticarse donde no se entra (MedGraph dejo de publicar sus instancias de prueba en produccion el 17-sep-2026)."
+        },
+        "mcp": {
+          "type": "object",
+          "description": "COMO SE CONECTA ESTA INSTANCIA COMO MCP (tanda M2, 17-sep-2026; diseño nomos/knowledge/NOMOS_MCP.md §3.6). Bloque ADITIVO Y OPCIONAL: solo lo lleva la instancia que publica `capabilities.mcp: true`, y un descriptor que no lo trae es tan valido como antes.\n\nPARA QUE. Para Claude y para ChatGPT el 'instalable' de un grafo Nomos es UNA URL --no hay nada que descargar-- y hasta el 17-sep-2026 esa URL vivia en el README de cada repo y en un instalador que pegaba una clave. Publicarla en el descriptor es lo que le permite a la consola mostrar la seccion 'MCP' de cada instancia (URL para copiar, estado de OAuth, tools) sin saber nada de ese dominio, igual que dibuja las fuentes sin saber que es un libro.\n\nQUE NO VA ACA: ni una credencial, ni un client_id de una aplicacion OAuth, ni tokens. Esto es la puerta y su estado; quien entra lo decide el servidor de autorizacion.",
+          "required": ["url", "contract", "tools"],
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "description": "La URL EXACTA del endpoint MCP (Streamable HTTP), la misma que una persona escribe en su cliente y la misma que el `resource` de la metadata de recurso protegido (RFC 9728). Tiene que coincidir byte a byte: Claude compara el `resource` con la URL que le dieron, y si difieren (un `/` de mas, el host de Cloud Run en vez del dominio) el flujo de OAuth no arranca."
+            },
+            "contract": {
+              "const": "mcp/v1",
+              "description": "Version del contrato de tools que implementa el endpoint (mcp-v1.md). Lo que hace que 'Nomos Graph' sea un contrato y no el MCP de una instancia: un agente lee esto y sabe que `search`, `fetch`, `list_sources`, `search_entities`, `expand_concept`, `deep_dive` y `unified_query` estan y significan lo mismo que en cualquier otro grafo. Un cliente que no conoce la version no adivina: rechaza."
+            },
+            "tools": {
+              "type": "array",
+              "minItems": 7,
+              "uniqueItems": true,
+              "items": { "type": "string", "enum": ["search", "fetch", "list_sources", "search_entities", "expand_concept", "deep_dive", "unified_query", "evidence"] },
+              "description": "Los nombres que el endpoint publica HOY, no los que el contrato define: las siete obligatorias siempre, mas las capacidades opcionales que esta instancia implemente (`evidence` depende de una fuente externa y no todas la tienen). Se lee del registro del servidor MCP y no se retipea --una vidriera que ofrece una tool que el servidor no registro es el mismo bug de honestidad que un modelo que se ofrece y no corre--, y `tests/validar.py` cruza esta lista contra el vocabulario de mcp-tools/v1."
+            },
+            "oauth": {
+              "type": "object",
+              "description": "EL ESTADO DE LA PUERTA. Existe porque 'conectable desde Claude' no es una propiedad de nuestro codigo: depende de que el servidor de autorizacion anuncie registro dinamico de clientes (DCR, RFC 7591) o documento de metadata de cliente (CIMD). Los dos booleanos se leen del JSON PUBLICO del AS en cada consulta, no de una constante: son interruptores de su panel y el backend no puede afirmar nada sobre ellos. Ausente = la instancia autentica el MCP de otra manera (una clave), y entonces no hay nada de OAuth que contar.",
+              "required": ["authorization_servers", "dcr", "cimd"],
+              "additionalProperties": false,
+              "properties": {
+                "authorization_servers": {
+                  "type": "array",
+                  "items": { "type": "string", "format": "uri" },
+                  "description": "Los servidores de autorizacion, EN ORDEN DE PREFERENCIA y con el de produccion primero. El orden es contrato y no gusto: Claude usa el PRIMERO y no cae al segundo, asi que una instancia de prueba listada primera manda a la persona a autenticarse en un entorno que no es el suyo (era el defecto de MedGraph en produccion hasta el 17-sep-2026). Es la misma lista que sirve la metadata de recurso protegido."
+                },
+                "dcr": {
+                  "type": ["boolean", "null"],
+                  "description": "El AS anuncia `registration_endpoint`. `null` NO ES `false`: significa que no se pudo LEER su metadata, y la consola tiene que poder distinguir 'el interruptor esta apagado' de 'no se pudo mirar'. Sin DCR ni CIMD, ningun cliente de Claude o ChatGPT puede conectar sin pegar una credencial a mano."
+                },
+                "cimd": {
+                  "type": ["boolean", "null"],
+                  "description": "El AS anuncia `client_id_metadata_document_supported` (y `none` en los metodos de autenticacion del token endpoint, que es lo que Claude exige para elegir este camino). Mismo trato que `dcr` con el `null`."
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -450,6 +496,33 @@
         "properties": { "capabilities": { "required": ["vectorize"], "properties": { "vectorize": { "const": false } } } }
       },
       "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["vectorize"] } } }
+    },
+    {
+      "description": "Una capacidad en false tiene que decir por que y como. `mcp` es opcional con el mismo patron que `facets`, `units`, `vectorize` y `settings`: el `if` pide la CLAVE, asi que una instancia que no la publica (ausente = false) no queda obligada a nada. Publicarla en false EXPLICITO si obliga, y el caso tipico es `not_built`: el endpoint todavia no existe en ese grafo (LexGraph al 17-sep-2026), y quien administra tiene que poder distinguir eso de 'esta y no me deja entrar'.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["mcp"], "properties": { "mcp": { "const": false } } } }
+      },
+      "then": { "required": ["capability_notes"], "properties": { "capability_notes": { "required": ["mcp"] } } }
+    },
+    {
+      "description": "Si la instancia se sirve como MCP, tiene que decir DONDE, con QUE contrato y con QUE tools. Mismo patron que `units` con `unit_types` y `upload` con `accepted_formats`: la capacidad en true sin el bloque seria decir 'se puede conectar' sin decir a donde, y la consola no tendria de donde sacar la URL.",
+      "if": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["mcp"], "properties": { "mcp": { "const": true } } } }
+      },
+      "then": { "required": ["auth"], "properties": { "auth": { "required": ["mcp"] } } }
+    },
+    {
+      "description": "Y AL REVES: un bloque `auth.mcp` obliga a la capacidad en true. Es la direccion que de verdad se rompe --MedGraph publico `auth.mcp` el 17-sep-2026 (tanda M1) sin ninguna capacidad que lo declarara--: la consola lee `capabilities` con `!!` y esconde lo que esta en false o ausente, asi que un endpoint MCP publicado bajo una capacidad que nadie declaro es una puerta que existe y que la pantalla nunca muestra.",
+      "if": {
+        "required": ["auth"],
+        "properties": { "auth": { "required": ["mcp"] } }
+      },
+      "then": {
+        "required": ["capabilities"],
+        "properties": { "capabilities": { "required": ["mcp"], "properties": { "mcp": { "const": true } } } }
+      }
     }
   ],
   "additionalProperties": false
