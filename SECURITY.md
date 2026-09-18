@@ -33,8 +33,8 @@ The **default branch** is what gets fixed. Older tags are not patched — if you
 
 ## Scope
 
-In scope: anything in this repository — the `pipeline/` package, the root scripts, the MCP server,
-the `api/` snapshot, the Docker Compose setup, the profiles.
+In scope: anything in this repository — the `pipeline/` package, the root scripts, the `api/`
+service (including its MCP endpoint, `POST /mcp`), the Docker Compose setup, the profiles.
 
 Worth knowing before you report:
 

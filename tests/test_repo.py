@@ -3,9 +3,11 @@ haya un secreto adentro.
 
 POR QUE ESTOS TRES. Es un repo que la gente clona: los tres fallos que arruinan ese primer
 minuto no son de logica.
-  1. Un archivo que no PARSEA. `mcp_server.py` estuvo asi desde v1.0 —una edicion de limpieza
-     se comio una coma al sacar una URL privada— y `python mcp_server.py` moria en el import.
-     Nadie lo vio porque no habia un test que abriera los archivos.
+  1. Un archivo que no PARSEA. El caso que lo motivo fue `mcp_server.py`, que estuvo asi desde
+     v1.0 —una edicion de limpieza se comio una coma al sacar una URL privada— y moria en el
+     import; nadie lo vio porque no habia un test que abriera los archivos. Ese archivo se
+     retiro el 17-sep-2026 (el servidor MCP es ahora un endpoint de la API), pero el test se
+     queda: lo que cuida no es ese archivo sino que NINGUNO este roto.
   2. Una dependencia que la suite usa y `requirements.txt` no declara: el clon pasa los tests
      en la maquina del autor y falla en la del otro.
   3. Un secreto versionado. `.env` tiene que estar ignorado y `.env.example` tiene que traer
@@ -104,10 +106,11 @@ class TestDependenciasDeLaAPI:
         return salida
 
     @pytest.mark.parametrize("paquete", ["fastapi", "uvicorn", "neo4j", "google-genai",
-                                         "python-dotenv", "pymupdf", "slowapi", "pyyaml"])
+                                         "python-dotenv", "pymupdf", "slowapi", "pyyaml", "mcp"])
     def test_declara_lo_que_la_api_importa(self, paquete):
-        """`pymupdf` porque la API importa `pipeline/parseo.py`, y `pyyaml` porque el descriptor
-        de admin/v1 se arma desde el perfil de dominio."""
+        """`pymupdf` porque la API importa `pipeline/parseo.py`, `pyyaml` porque el descriptor de
+        admin/v1 se arma desde el perfil de dominio, y `mcp` porque `api/routers/mcp_remote.py`
+        monta el endpoint MCP dentro de la misma app (17-sep-2026)."""
         assert paquete in self._declaradas(), f"{paquete} no esta en api/requirements.txt"
 
     def test_todas_las_dependencias_de_la_imagen_estan_pineadas(self):

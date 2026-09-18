@@ -93,7 +93,7 @@ these honest with an AST test):
 | `parser_v2.py` | **alive — shim** | Re-exports `pipeline.parseo` (the same objects, not a copy) and keeps the `catalog.json`-driven CLI. Import it and you get the canonical parser. |
 | `db.py`, `schema.py` | **alive** | Neo4j connection helper and schema/index creation. |
 | `extract_entities.py`, `dedup_entities.py`, `ontology.py`, `load_dags.py` | **alive** | Post-load steps; no counterpart in `pipeline/`. LLM calls go through `google-genai`. |
-| `mcp_server.py` | **alive** | MCP server for Claude. It did not even parse between v1.0 and this commit (a redaction ate a comma); `tests/test_repo.py` now guards that. |
+| `mcp_server.py` | **gone (2026-09-17)** | It was a *stdio* MCP server talking HTTP to a separate API, with eleven instance-prefixed tools — three of them against routes this mirror no longer exposes. The MCP endpoint now lives **inside** the API: `POST /mcp`, see [The MCP endpoint](#the-mcp-endpoint). |
 | `quickstart.py` | **alive, but** | Uses the legacy upload path and requires Neo4j before it parses anything (see Quick start). |
 | `migrate_chunks.py` | **hybrid** | Re-exports `normalize_chunks`/`normalize_for_search` from `pipeline.parseo`, but its own uploader still does `CREATE` — i.e. it is **not** the idempotent load of `pipeline/carga.py`. |
 | `vectorize.py` | **legacy** | Its own embedding loop, its own `EMBEDDING_MODEL`, its own batch size. Duplicates `pipeline/embeddings.py` and does not have the retry/second-pass policy or the paid-call accounting. |
@@ -257,6 +257,7 @@ no header — and every route except `/health` needs it: `Authorization: Bearer 
 | `GET /topic/{t}/pathways`, `/clinical` | The DAGs loaded by `load_dags.py`. | — |
 | `GET /topic/{t}/ontology` | ATC / SNOMED hierarchies (`ontology.py`). | — |
 | `GET /pathology/{n}`, `/pathology/{n}/differential`, `/procedure/{n}` | Typed entities and what hangs off them. | — |
+| `POST /mcp` | The MCP endpoint (Streamable HTTP): the same corpus as seven `mcp/v1` tools, for Claude, ChatGPT or any MCP client. See [The MCP endpoint](#the-mcp-endpoint). | depends on the tool |
 | `GET /health`, `GET /stats` | Liveness (no credential) and node / relationship counts. | — |
 
 **Administration** — `admin/v1`, the contract every Nomos graph implements so that a single console
@@ -299,24 +300,56 @@ beats one that is bigger and answers with empty lists:
 
 `GET /topic/{t}/comprehensive` survived, minus its `:Tema` and activities sections.
 
-### The MCP server
+### The MCP endpoint
 
-`mcp_server.py` exposes the API's routes as eleven tools for Claude (`medgraph_query`,
-`medgraph_search`, `medgraph_comprehensive`, `medgraph_pathways`, `medgraph_clinical`,
-`medgraph_activity`, `medgraph_activity_material`, `medgraph_pathology`, `medgraph_procedure`,
-`medgraph_ontology`, `medgraph_cronograma`). It talks HTTP to a running MedGraph API
-(`MEDGRAPH_API_URL`, `API_KEY`), so it inherits whatever state the API is in. `medgraph_cronograma`
-calls a *separate* schedule API of your own (`SCHEDULE_API_URL`), not MedGraph.
+The API **is** an MCP server: `POST /mcp`, Streamable HTTP, stateless. It implements `mcp/v1`, the
+tool contract every Nomos graph serves (`nomos-contracts/mcp-v1.md`; the JSON Schema is vendored in
+`tests/contracts/mcp-tools.schema.json` and the suite validates what a client actually receives
+against it). Seven read-only tools, no instance prefix:
 
-Heads-up after the prune above: `medgraph_activity` and `medgraph_activity_material` call routes
-this mirror no longer exposes, and `medgraph_cronograma` never pointed here. Against the API in
-this repo they 404; against a private instance that still serves them they work, which is why the
-tools are left in place instead of deleted.
+| Tool | What it does here |
+|---|---|
+| `search` | The hybrid search of `POST /search/hybrid`, with `filtros`, `garantizar`, `agrupar` and `procedencia`. |
+| `fetch` | One passage by id, with its provenance metadata. |
+| `list_sources` | The `admin/v1` catalogue: sources, passages, embedding coverage, status. |
+| `search_entities` / `expand_concept` | The typed entity graph, one hop, filtered by relation type. |
+| `deep_dive` | Dozens of passages grouped by facet, deduplicated — the tool for writing a document. |
+| `unified_query` | The full router of `POST /query`: the analyser plus the corpus layer. |
+
+`evidence` — the contract's one optional capability — is **not** published: it requires an external
+source (the private instance asks PubMed) and this repo ships no adapter. Seven tools are the whole
+contract.
+
+**Authentication is the instance API key**, the same one the rest of the API takes, and `/mcp` is
+not exempt from the middleware. There is no OAuth authorization server here, so the 401 carries no
+`resource_metadata`: its body explains the credential instead. Consequently the `admin/v1` descriptor
+publishes `capabilities.mcp: true` and `auth.mcp` **without** an `oauth` block — which the contract
+reads as "this instance authenticates its MCP some other way". Putting an authorization server in
+front (and publishing your own protected-resource metadata) is a deployment decision the contract
+already contemplates; nothing in the code needs to change for the tools themselves.
 
 ```bash
-pip install mcp httpx          # not in requirements.txt: the pipeline does not need them
-python mcp_server.py           # stdio transport
+# Claude Code, against a local API. Header support depends on your client version; if it cannot send
+# one, put a proxy in front or use a client that can.
+claude mcp add --transport http medgraph-engine http://localhost:8000/mcp \
+  --header "X-API-Key: $API_KEY"
+
+# Anything else: it is plain Streamable HTTP.
+curl -s -X POST http://localhost:8000/mcp -H "X-API-Key: $API_KEY" \
+     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 ```
+
+`MCP_ALLOWED_HOSTS` matters once this runs behind a domain: the SDK validates the `Host` header
+against it (DNS-rebinding protection) and answers `421 Invalid Host header` otherwise. Left empty it
+derives the hosts from `PUBLIC_BASE_URL` plus localhost.
+
+*(Until 2026-09-17 this section described `mcp_server.py`, a separate **stdio** server that talked
+HTTP to a running API and published eleven tools named `medgraph_*` — three of them against routes
+this mirror no longer exposes. It was deleted: the prefix forced every agent to be rewritten when
+changing graphs, and a second copy of the tool surface is exactly what the `mcp/v1` contract exists
+to stop. If your client cannot speak Streamable HTTP, the place for a stdio shim is the client side,
+not a second tool surface in this repo.)*
 
 ---
 

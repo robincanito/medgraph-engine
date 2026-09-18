@@ -17,6 +17,7 @@ import logging
 import secrets
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 # El pipeline (`pipeline/parseo.py`, `pipeline/perfiles.py`) vive FUERA de api/, y esta API lo
@@ -35,7 +36,16 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from pipeline import perfiles
-from routers import admin_v1, comprehensive, ontology_router, pathology, procedure, search, unified
+from routers import (
+    admin_v1,
+    comprehensive,
+    mcp_remote,
+    ontology_router,
+    pathology,
+    procedure,
+    search,
+    unified,
+)
 from services import graph
 from services.autorizacion import AdminError
 from services.settings import get_settings
@@ -62,11 +72,24 @@ perfiles.cargar(settings.profile)
 # Rate limiter
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Corre el session manager del MCP remoto (17-sep-2026).
+
+    Montar un sub-app ASGI NO ejecuta su lifespan, asi que hay que encadenarlo aca o `/mcp` falla en
+    el primer request con "Task group is not initialized".
+    """
+    async with mcp_remote.mcp_lifespan():
+        yield
+
+
 app = FastAPI(
     title="MedGraph Engine API",
     description="Consulta del grafo y administracion admin/v1 sobre lo que ingesto el pipeline",
     version="2.1.0",
     servers=[{"url": settings.public_base_url}],
+    lifespan=lifespan,
     # /docs solo con ENVIRONMENT=development EXACTO (y detras de la API key igual, porque el
     # middleware no lo exime): `environment_declarable` mapea lo desconocido a development para
     # que el descriptor valide contra el contrato, y eso no puede decidir que se publica.
@@ -110,6 +133,25 @@ async def auth_middleware(request: Request, call_next):
         # de un 401 — el acceso quedaba denegado igual, pero ningun cliente podia distinguir
         # "te falta la clave" de "el servidor se rompio", y `tests/test_admin_v1.py` lo fija.
         # El `WWW-Authenticate` lo pide el contrato admin/v1 para el 401.
+        #
+        # EN `/mcp` EL CUERPO DICE COMO ENTRAR (17-sep-2026). Un cliente MCP que recibe un 401 busca
+        # en el header a que servidor de autorizacion ir (`resource_metadata`, RFC 9728) y acá NO HAY
+        # NINGUNO: esta instancia autentica con una clave compartida. Anunciar un flujo de OAuth que
+        # no existe mandaria al cliente a un descubrimiento que termina en 404; callar deja a quien
+        # conecta sin saber que le falta. Asi que el header queda como esta --sin `resource_metadata`
+        # y sin `scope`-- y el cuerpo explica la credencial, que es lo unico honesto que se puede
+        # decir. Un despliegue que quiera OAuth por persona pone un authorization server adelante y
+        # publica su propia metadata: el contrato mcp/v1 lo contempla (`auth.mcp.oauth` es opcional).
+        if request.url.path.startswith("/mcp"):
+            return JSONResponse(
+                {"detail": "This MCP endpoint requires the instance API key. Send it as "
+                           "'Authorization: Bearer <key>' or as the 'X-API-Key' header. There is no "
+                           "OAuth authorization server for this deployment: the key is issued by "
+                           "whoever operates it.",
+                 "code": "unauthorized"},
+                status_code=401,
+                headers={"WWW-Authenticate": 'Bearer realm="medgraph-engine"'},
+            )
         return JSONResponse(
             {"detail": "Invalid or missing API key.", "code": "unauthorized"},
             status_code=401,
@@ -164,6 +206,19 @@ async def health():
 @app.get("/stats")
 async def stats():
     return graph.get_stats()
+
+
+# === MCP REMOTO (Streamable HTTP) — DEBE SER LO ULTIMO DEL ARCHIVO ===
+# Va montado en la RAIZ (no en "/mcp") porque montarlo en "/mcp" hace que Starlette responda 307 a
+# "/mcp/", y un redirect en POST es fragil: varios clientes descartan el body. Con path interno
+# "/mcp" + mount en "/", el endpoint responde directo.
+#
+# ULTIMO EN EL ARCHIVO A PROPOSITO: Starlette matchea rutas en orden y un mount en la raiz se come
+# todo lo que se declare despues (`/health` empezaria a devolver 404).
+#
+# La puerta es el middleware de arriba: `/mcp` no esta exento, asi que exige la misma clave que el
+# resto de la API.
+app.mount("/", mcp_remote.get_asgi_app())
 
 
 if __name__ == "__main__":

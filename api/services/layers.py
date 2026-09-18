@@ -140,8 +140,23 @@ def execute_graph(analysis: dict) -> dict:
     return result
 
 
-def execute_bibliography(analysis: dict, top_k: int = 20) -> dict:
-    """Búsqueda híbrida multi-query: cada sub-query busca un aspecto del tema."""
+def execute_bibliography(analysis: dict, top_k: int = 20, filtros: dict = None,
+                         garantizar: dict = None, agrupar: str = None) -> dict:
+    """Búsqueda híbrida multi-query: cada sub-query busca un aspecto del tema.
+
+    LOS TRES ARGUMENTOS NUEVOS SON ADITIVOS (17-sep-2026, tanda M3 de `nomos/knowledge/NOMOS_MCP.md`)
+    y bajan tal cual a `vector.search_hybrid`: `filtros` (acotar QUE fuentes pueden contestar),
+    `garantizar` (reservar cupo para las que el cliente nombra) y `agrupar`. Entran porque la tool
+    `unified_query` del contrato `mcp/v1` los declara, y la alternativa era una SEGUNDA capa de
+    bibliografía que sí supiera acotar: dos caminos que hacen lo mismo y se desincronizan. `/query`
+    sigue llamándola con dos argumentos y se comporta igual que antes.
+
+    Y DEVUELVE LA DEGRADACIÓN, que antes moría acá. `search_hybrid` ya distingue "no hay material"
+    de "no se pudo consultar el corpus" (`degradado` + `fallas`), pero este bucle se tragaba las dos
+    cosas y devolvía `results: []`. Una lista vacía por caída se lee igual que una ausencia, y el
+    modelo contesta de su propio conocimiento sin decirlo — es la regla 4 del contrato de tools, y
+    es lo que `unified_query` necesita para poblar `degraded`/`notice`.
+    """
     import logging
 
     sub_queries = analysis.get("sub_queries", [analysis["original"]])
@@ -154,15 +169,29 @@ def execute_bibliography(analysis: dict, top_k: int = 20) -> dict:
     all_results = {}  # id -> chunk (dedup)
     total_keyword = 0
     total_semantic = 0
+    #: Sub-queries que NO pudieron consultar el corpus: la excepción que `search_hybrid` relanza
+    #: cuando todas sus rutas cayeron y una era del grafo, o su `degradado: "total"`. Es el
+    #: denominador de "no se consultó nada".
+    caidas = 0
+    fallas: list = []
+    pool_acumulado: dict = {}
 
     for sq in sub_queries:
         try:
             # Cada sub-query busca un pool amplio para maximizar recall
             per_query_k = max(20, top_k)
-            result = vector.search_hybrid(sq, top_k=per_query_k)
+            result = vector.search_hybrid(sq, top_k=per_query_k, filtros=filtros,
+                                          garantizar=garantizar, agrupar=agrupar)
 
             total_keyword += result.get("keyword_count", 0)
             total_semantic += result.get("semantic_count", 0)
+            if result.get("degradado") == "total":
+                caidas += 1
+            for f in result.get("fallas") or []:
+                if f not in fallas:
+                    fallas.append(f)
+            for libro, n in ((result.get("procedencia") or {}).get("pool") or {}).items():
+                pool_acumulado[libro] = pool_acumulado.get(libro, 0) + n
 
             for chunk in result.get("results", []):
                 cid = chunk.get("id", "")
@@ -174,10 +203,18 @@ def execute_bibliography(analysis: dict, top_k: int = 20) -> dict:
 
         except Exception as e:
             logging.error(f"Bibliography sub-query failed '{sq}': {type(e).__name__}: {str(e)[:80]}")
+            caidas += 1
+            fallas.append({"ruta": "sub_query", "error": type(e).__name__, "grafo": True})
 
     # Ordenar por score acumulado y tomar top_k
     sorted_results = sorted(all_results.values(), key=lambda x: x.get("rrf_score", 0), reverse=True)
     final = sorted_results[:top_k]
+
+    top = {}
+    for chunk in final:
+        libro = chunk.get("libro")
+        if libro:
+            top[libro] = top.get(libro, 0) + 1
 
     return {
         "keyword_count": total_keyword,
@@ -187,6 +224,16 @@ def execute_bibliography(analysis: dict, top_k: int = 20) -> dict:
         "intencion": analysis.get("intencion", "general"),
         "query_expandida": analysis.get("expandida", ""),
         "results": final,
+        # `top_k` se recuenta sobre lo que sobrevivió al dedup entre sub-queries —que es lo que el
+        # cliente tiene delante— y `pool` se suma tal cual: es lo que distingue "el ranking la
+        # enterró" de "esa fuente no tiene material".
+        "procedencia": {"top_k": dict(sorted(top.items(), key=lambda kv: (-kv[1], kv[0]))),
+                        "pool": dict(sorted(pool_acumulado.items(),
+                                            key=lambda kv: (-kv[1], kv[0]))),
+                        "candidatos_unicos": len(all_results)},
+        "degradado": ("total" if caidas and caidas == len(sub_queries)
+                      else ("parcial" if fallas else None)),
+        "fallas": fallas,
     }
 
 

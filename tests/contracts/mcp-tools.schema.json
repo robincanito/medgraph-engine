@@ -1,0 +1,516 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nomos.unicrono.com/contracts/mcp-tools/v1",
+  "title": "NomosGraphTools",
+  "description": "LA SUPERFICIE DE TOOLS que un grafo Nomos publica por MCP: los nombres, las entradas, las salidas y las anotaciones que hacen que 'Nomos Graph' sea UN CONTRATO y no 'el MCP de MedGraph'. Es lo que un cliente (Claude, ChatGPT, Claude Code) recibe al pedir `tools/list`, normalizado a un documento validable. Diseño: nomos/knowledge/NOMOS_MCP.md §3.6 y §4; tanda M2, 17-sep-2026. La prosa normativa --que hace cada tool, que promete cada campo y que NO fija este contrato-- vive en mcp-v1.md.\n\nPOR QUE EXISTE. El 16-sep-2026 habia cinco copias del servidor MCP en el ecosistema (el remoto de MedGraph, su stdio, el instalador del cliente, el cliente OSS y el del engine) y sus tools YA HABIAN DIVERGIDO: el del engine publicaba tools de rutas retiradas. Sin un contrato, cada instancia que se agrega es un MCP distinto con el mismo nombre, y quien escribe un agente contra uno no puede apuntarlo a otro. Con este documento, una instancia nueva (LexGraph, el engine, un dominio que todavia no existe) no decide que tools tiene: las implementa.\n\nDOMAIN-AGNOSTIC, igual que admin/v1. Ni una palabra de ningun dominio en los nombres ni en los campos: `fuente`, `unidad` y `coleccion` son el vocabulario, y la INSTANCIA los traduce a los suyos (libro/chunk, norma/articulo) en `descriptor.labels` y en el texto de sus descripciones. Las descripciones SI son de la instancia --nombran su corpus y su dominio-- y por eso el contrato fija su largo minimo, no su texto.\n\nQUE SE VALIDA CONTRA ESTO. La instancia lista sus tools con el cliente oficial del SDK `mcp`, normaliza cada una a {name, description, inputSchema, outputSchema, annotations} y valida el documento entero. MedGraph lo hace en tests/test_mcp_contrato.py contra la app ASGI en memoria: si el contrato y lo publicado se separan, se pone rojo ahi y no en la conexion de una persona.",
+  "type": "object",
+  "required": ["contract_version", "tools"],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": {
+      "const": "mcp/v1",
+      "description": "Version del contrato de MCP que implementa la instancia. Viaja tambien en `descriptor.auth.mcp.contract` (admin/v1): un cliente que no conoce la version no adivina, rechaza."
+    },
+    "instance": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "`descriptor.instance.name` de quien publica (medgraph, lexgraph). Opcional: el mismo documento sirve para describir la superficie CANONICA, sin instancia."
+    },
+    "instructions": {
+      "type": "string",
+      "minLength": 200,
+      "description": "Las instrucciones del servidor (`instructions` del `initialize` del SDK): como se usan estas tools, en el idioma del cliente que las va a leer (un LLM). Opcional en el contrato porque no es una tool, y se publica igual porque es lo unico que puede decirle al modelo que el material recuperado es EVIDENCIA y no verdad, y que hay que citar. Los primeros 512 caracteres tienen que ser autosuficientes: varios clientes truncan ahi."
+    },
+    "tools": {
+      "type": "array",
+      "minItems": 7,
+      "description": "Las tools publicadas. LAS SIETE OBLIGATORIAS TIENEN QUE ESTAR (los `contains` de abajo son la forma machine-readable de decir cuales son); `evidence` es una CAPACIDAD OPCIONAL y puede faltar. Una instancia no puede publicar una tool que este contrato no declara: el `enum` de `name` lo cierra, porque una tool de mas es una superficie que ningun otro grafo tiene y que ningun agente puede asumir.",
+      "items": { "$ref": "#/$defs/Tool" },
+      "allOf": [
+        { "description": "`search` es obligatoria: es la mitad de lo que ChatGPT exige de un conector (search + fetch) y la puerta de entrada de cualquier agente.", "contains": { "required": ["name"], "properties": { "name": { "const": "search" } } } },
+        { "description": "`fetch` es obligatoria: sin ella `search` devuelve ids que nadie puede abrir.", "contains": { "required": ["name"], "properties": { "name": { "const": "fetch" } } } },
+        { "description": "`list_sources` es obligatoria: es lo unico que evita que el modelo ADIVINE ids de fuente y colecciones; sin ella, `filtros` es un campo que no se puede llenar.", "contains": { "required": ["name"], "properties": { "name": { "const": "list_sources" } } } },
+        { "description": "`search_entities` es obligatoria: es la entrada al grafo de conceptos, y el grafo es lo que distingue a Nomos de un indice de pasajes.", "contains": { "required": ["name"], "properties": { "name": { "const": "search_entities" } } } },
+        { "description": "`expand_concept` es obligatoria: sin ella `search_entities` devuelve ids que no llevan a ninguna relacion.", "contains": { "required": ["name"], "properties": { "name": { "const": "expand_concept" } } } },
+        { "description": "`deep_dive` es obligatoria: es la tool de ESTUDIAR (decenas de unidades agrupadas por faceta) y la unica con la que se puede escribir un documento sin rellenar huecos con conocimiento general.", "contains": { "required": ["name"], "properties": { "name": { "const": "deep_dive" } } } },
+        { "description": "`unified_query` es obligatoria: es el router completo de la instancia, y es lo que una pregunta de razonamiento necesita.", "contains": { "required": ["name"], "properties": { "name": { "const": "unified_query" } } } }
+      ]
+    }
+  },
+  "$defs": {
+    "Tool": {
+      "title": "NomosGraphTool",
+      "description": "UNA tool, normalizada. `title` se admite porque MCP lo define; nada mas: el documento es el CONTRATO de la tool, no el volcado de lo que un SDK serialice (`_meta`, `icons`), y si algun dia hace falta uno de esos, entra declarado.",
+      "type": "object",
+      "required": ["name", "description", "inputSchema", "outputSchema", "annotations"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": ["search", "fetch", "list_sources", "search_entities", "expand_concept", "deep_dive", "unified_query", "evidence"],
+          "description": "VOCABULARIO CERRADO. Los nombres son parte del contrato y no del gusto de cada instancia: un agente escrito contra `search` de MedGraph tiene que funcionar contra `search` de LexGraph sin tocar una linea. Sin prefijo de instancia a proposito (`medgraph_search` era el defecto del stdio: el cliente ya sabe a que servidor le habla, y el prefijo obliga a reescribir el agente al cambiar de grafo)."
+        },
+        "title": {
+          "type": "string",
+          "description": "Titulo legible para una interfaz, si el SDK lo publica. Opcional: lo que enruta es `name`."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 80,
+          "description": "QUE HACE Y CUANDO USARLA, escrito para que lo lea un modelo. El contrato fija el LARGO MINIMO y no el texto: el texto nombra el corpus y el dominio de la instancia ('el corpus documental de la organizacion', 'el corpus normativo'), y eso no se puede escribir una vez para todos. El minimo existe porque una descripcion de dos palabras hace que el modelo use la tool mal --y porque los directorios de Claude y de ChatGPT rechazan tools sin descripcion real (§8 del diseño)--. Nunca lleva instrucciones de conducta ajenas a la tool: eso es inyeccion de prompt y es motivo de rechazo."
+        },
+        "annotations": { "$ref": "#/$defs/Anotaciones" },
+        "inputSchema": { "$ref": "#/$defs/EsquemaDeEntrada" },
+        "outputSchema": { "$ref": "#/$defs/EsquemaDeSalida" }
+      },
+      "allOf": [
+        {
+          "description": "`search` — descubrir unidades del corpus. `query` y `limit` son del contrato; `filtros` (acotar QUE fuentes pueden contestar), `garantizar` (reservar lugares para fuentes nombradas) y `agrupar` (colapsar recortes de la misma unidad padre) son opcionales pero, si se publican, se llaman y significan ESTO. La salida lleva `degraded`, `notice` y `procedencia` SIEMPRE: una lista vacia por caida del grafo se lee igual que 'no hay material' y el modelo contesta de su propio conocimiento sin decirlo (medido el 10-sep-2026).",
+          "if": { "required": ["name"], "properties": { "name": { "const": "search" } } },
+          "then": {
+            "properties": {
+              "annotations": { "properties": { "openWorldHint": { "const": false } } },
+              "inputSchema": {
+                "required": ["required"],
+                "properties": {
+                  "required": { "const": ["query"] },
+                  "properties": {
+                    "required": ["query", "limit"],
+                    "propertyNames": { "enum": ["query", "limit", "filtros", "garantizar", "agrupar"] },
+                    "properties": {
+                      "query": { "$ref": "#/$defs/tipos/cadena" },
+                      "limit": { "$ref": "#/$defs/tipos/entero" },
+                      "filtros": { "$ref": "#/$defs/tipos/objeto" },
+                      "garantizar": { "$ref": "#/$defs/tipos/objeto" },
+                      "agrupar": { "$ref": "#/$defs/tipos/cadena" }
+                    }
+                  }
+                }
+              },
+              "outputSchema": {
+                "properties": {
+                  "required": { "contains": { "const": "results" } },
+                  "properties": {
+                    "required": ["results", "degraded", "notice", "procedencia"],
+                    "propertyNames": { "enum": ["results", "degraded", "notice", "procedencia"] },
+                    "properties": {
+                      "results": { "$ref": "#/$defs/tipos/lista" },
+                      "degraded": { "$ref": "#/$defs/tipos/booleano" },
+                      "notice": { "$ref": "#/$defs/tipos/cadena" },
+                      "procedencia": { "$ref": "#/$defs/tipos/objeto" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "`fetch` — abrir UNA unidad por su id. Entrada minima de verdad: un id, y nada mas (el `id` sale de un `search` previo; construirlo es un error del cliente). La salida es la forma que ChatGPT exige de un conector: id, title, text, url, metadata. No lleva `degraded` obligatorio porque un id que no existe es un ERROR tipado, no una lista vacia.",
+          "if": { "required": ["name"], "properties": { "name": { "const": "fetch" } } },
+          "then": {
+            "properties": {
+              "annotations": { "properties": { "openWorldHint": { "const": false } } },
+              "inputSchema": {
+                "required": ["required"],
+                "properties": {
+                  "required": { "const": ["id"] },
+                  "properties": {
+                    "required": ["id"],
+                    "propertyNames": { "enum": ["id"] },
+                    "properties": { "id": { "$ref": "#/$defs/tipos/cadena" } }
+                  }
+                }
+              },
+              "outputSchema": {
+                "properties": {
+                  "required": {
+                    "allOf": [
+                      { "contains": { "const": "id" } },
+                      { "contains": { "const": "title" } },
+                      { "contains": { "const": "text" } },
+                      { "contains": { "const": "url" } },
+                      { "contains": { "const": "metadata" } }
+                    ]
+                  },
+                  "properties": {
+                    "required": ["id", "title", "text", "url", "metadata"],
+                    "propertyNames": { "enum": ["id", "title", "text", "url", "metadata", "degraded", "notice"] },
+                    "properties": {
+                      "id": { "$ref": "#/$defs/tipos/cadena" },
+                      "title": { "$ref": "#/$defs/tipos/cadena" },
+                      "text": { "$ref": "#/$defs/tipos/cadena" },
+                      "url": { "$ref": "#/$defs/tipos/cadena" },
+                      "metadata": { "$ref": "#/$defs/tipos/objeto" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "`list_sources` — el catalogo: que fuentes hay y de que tratan. LOS FILTROS SON DE LA INSTANCIA y por eso el contrato no cierra sus nombres: MedGraph filtra por area, idioma y coleccion; una norma no tiene area. Lo que SI fija: se puede llamar SIN argumentos (un catalogo que exige un filtro no es un catalogo) y ningun argumento puede ser un objeto ni una lista --es la regla que impide que una tool pida 'el contexto de la conversacion por las dudas', que es motivo de rechazo en ChatGPT (§8.2)--.",
+          "if": { "required": ["name"], "properties": { "name": { "const": "list_sources" } } },
+          "then": {
+            "properties": {
+              "annotations": { "properties": { "openWorldHint": { "const": false } } },
+              "inputSchema": {
+                "properties": {
+                  "required": { "maxItems": 0 },
+                  "properties": { "additionalProperties": { "$ref": "#/$defs/tipos/escalar" } }
+                }
+              },
+              "outputSchema": {
+                "properties": {
+                  "required": {
+                    "allOf": [
+                      { "contains": { "const": "sources" } },
+                      { "contains": { "const": "count" } },
+                      { "contains": { "const": "stats" } }
+                    ]
+                  },
+                  "properties": {
+                    "required": ["sources", "count", "stats"],
+                    "propertyNames": { "enum": ["sources", "count", "stats", "degraded", "notice"] },
+                    "properties": {
+                      "sources": { "$ref": "#/$defs/tipos/lista" },
+                      "count": { "$ref": "#/$defs/tipos/entero" },
+                      "stats": { "$ref": "#/$defs/tipos/objeto" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "`search_entities` — encontrar entidades del grafo por nombre, para despues expandirlas. `count` viaja aunque `entities` ya se pueda contar: es lo que distingue 'el grafo contesto y no hay ninguna' de una respuesta recortada.",
+          "if": { "required": ["name"], "properties": { "name": { "const": "search_entities" } } },
+          "then": {
+            "properties": {
+              "annotations": { "properties": { "openWorldHint": { "const": false } } },
+              "inputSchema": {
+                "required": ["required"],
+                "properties": {
+                  "required": { "const": ["query"] },
+                  "properties": {
+                    "required": ["query", "limit"],
+                    "propertyNames": { "enum": ["query", "limit"] },
+                    "properties": {
+                      "query": { "$ref": "#/$defs/tipos/cadena" },
+                      "limit": { "$ref": "#/$defs/tipos/entero" }
+                    }
+                  }
+                }
+              },
+              "outputSchema": {
+                "properties": {
+                  "required": {
+                    "allOf": [
+                      { "contains": { "const": "query" } },
+                      { "contains": { "const": "entities" } },
+                      { "contains": { "const": "count" } }
+                    ]
+                  },
+                  "properties": {
+                    "required": ["query", "entities", "count"],
+                    "propertyNames": { "enum": ["query", "entities", "count", "degraded", "notice"] },
+                    "properties": {
+                      "query": { "$ref": "#/$defs/tipos/cadena" },
+                      "entities": { "$ref": "#/$defs/tipos/lista" },
+                      "count": { "$ref": "#/$defs/tipos/entero" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "`expand_concept` — los vecinos de UNA entidad, UN salto. El salto es uno y no se pide por parametro a proposito: dos saltos sobre un grafo de cientos de miles de entidades es una respuesta que ningun cliente puede leer. `count` es un objeto (cuantos nodos, cuantas aristas), no un entero.",
+          "if": { "required": ["name"], "properties": { "name": { "const": "expand_concept" } } },
+          "then": {
+            "properties": {
+              "annotations": { "properties": { "openWorldHint": { "const": false } } },
+              "inputSchema": {
+                "required": ["required"],
+                "properties": {
+                  "required": { "const": ["entity_id"] },
+                  "properties": {
+                    "required": ["entity_id", "limit"],
+                    "propertyNames": { "enum": ["entity_id", "relation_types", "limit"] },
+                    "properties": {
+                      "entity_id": { "$ref": "#/$defs/tipos/cadena" },
+                      "relation_types": { "$ref": "#/$defs/tipos/lista" },
+                      "limit": { "$ref": "#/$defs/tipos/entero" }
+                    }
+                  }
+                }
+              },
+              "outputSchema": {
+                "properties": {
+                  "required": {
+                    "allOf": [
+                      { "contains": { "const": "center" } },
+                      { "contains": { "const": "nodes" } },
+                      { "contains": { "const": "edges" } },
+                      { "contains": { "const": "count" } }
+                    ]
+                  },
+                  "properties": {
+                    "required": ["center", "nodes", "edges", "count"],
+                    "propertyNames": { "enum": ["center", "nodes", "edges", "count", "degraded", "notice"] },
+                    "properties": {
+                      "center": { "$ref": "#/$defs/tipos/cadena" },
+                      "nodes": { "$ref": "#/$defs/tipos/lista" },
+                      "edges": { "$ref": "#/$defs/tipos/lista" },
+                      "count": { "$ref": "#/$defs/tipos/objeto" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "`deep_dive` — TODO lo que la instancia tiene sobre un tema, agrupado por faceta. Es la tool de escribir un documento, y por eso su salida promete tres cosas: `facets` (faceta -> unidades), `total_passages` y la degradacion. `evidence`/`evidence_query`/`evidence_window` aparecen SOLO en una instancia que implementa la capacidad opcional `evidence`: una fuente externa envejece distinto que el corpus y se cita distinto, asi que viaja en su propia clave y nunca mezclada en `facets`.",
+          "if": { "required": ["name"], "properties": { "name": { "const": "deep_dive" } } },
+          "then": {
+            "properties": {
+              "annotations": { "properties": { "openWorldHint": { "const": false } } },
+              "inputSchema": {
+                "required": ["required"],
+                "properties": {
+                  "required": { "const": ["topic"] },
+                  "properties": {
+                    "required": ["topic", "facets", "per_facet"],
+                    "propertyNames": { "enum": ["topic", "facets", "per_facet", "include_graph", "include_evidence", "filtros", "garantizar", "agrupar"] },
+                    "properties": {
+                      "topic": { "$ref": "#/$defs/tipos/cadena" },
+                      "facets": { "$ref": "#/$defs/tipos/lista" },
+                      "per_facet": { "$ref": "#/$defs/tipos/entero" },
+                      "include_graph": { "$ref": "#/$defs/tipos/booleano" },
+                      "include_evidence": { "$ref": "#/$defs/tipos/booleano" },
+                      "filtros": { "$ref": "#/$defs/tipos/objeto" },
+                      "garantizar": { "$ref": "#/$defs/tipos/objeto" },
+                      "agrupar": { "$ref": "#/$defs/tipos/cadena" }
+                    }
+                  }
+                }
+              },
+              "outputSchema": {
+                "properties": {
+                  "required": {
+                    "allOf": [
+                      { "contains": { "const": "topic" } },
+                      { "contains": { "const": "facets" } },
+                      { "contains": { "const": "total_passages" } }
+                    ]
+                  },
+                  "properties": {
+                    "required": ["topic", "facets", "total_passages", "degraded", "notice", "procedencia"],
+                    "propertyNames": { "enum": ["topic", "facets", "total_passages", "sources_used", "graph_relations", "evidence", "evidence_query", "evidence_window", "degraded", "notice", "procedencia"] },
+                    "properties": {
+                      "topic": { "$ref": "#/$defs/tipos/cadena" },
+                      "facets": { "$ref": "#/$defs/tipos/objeto" },
+                      "total_passages": { "$ref": "#/$defs/tipos/entero" },
+                      "sources_used": { "$ref": "#/$defs/tipos/lista" },
+                      "graph_relations": { "$ref": "#/$defs/tipos/lista" },
+                      "evidence": { "$ref": "#/$defs/tipos/lista" },
+                      "evidence_query": { "$ref": "#/$defs/tipos/cadena" },
+                      "evidence_window": { "$ref": "#/$defs/tipos/cadena" },
+                      "degraded": { "$ref": "#/$defs/tipos/booleano" },
+                      "notice": { "$ref": "#/$defs/tipos/cadena" },
+                      "procedencia": { "$ref": "#/$defs/tipos/objeto" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "`unified_query` — el router completo de la instancia sobre UNA pregunta: clasifica, reformula, elige fuentes probables y activa las capas que correspondan. `layers_activated` es parte del contrato porque es lo que deja saber QUE se consulto: sin eso, una respuesta pobre no se distingue de una capa que no corrio. `sub_queries_<xx>` (dos letras ISO 639-1) admite las reformulaciones a otra lengua del corpus en una instancia multilingue.",
+          "if": { "required": ["name"], "properties": { "name": { "const": "unified_query" } } },
+          "then": {
+            "properties": {
+              "annotations": { "properties": { "openWorldHint": { "const": false } } },
+              "inputSchema": {
+                "required": ["required"],
+                "properties": {
+                  "required": { "const": ["question"] },
+                  "properties": {
+                    "required": ["question", "top_k"],
+                    "propertyNames": { "enum": ["question", "top_k", "filtros", "garantizar", "agrupar"] },
+                    "properties": {
+                      "question": { "$ref": "#/$defs/tipos/cadena" },
+                      "top_k": { "$ref": "#/$defs/tipos/entero" },
+                      "filtros": { "$ref": "#/$defs/tipos/objeto" },
+                      "garantizar": { "$ref": "#/$defs/tipos/objeto" },
+                      "agrupar": { "$ref": "#/$defs/tipos/cadena" }
+                    }
+                  }
+                }
+              },
+              "outputSchema": {
+                "properties": {
+                  "required": { "contains": { "const": "question" } },
+                  "properties": {
+                    "required": ["question", "intent", "layers_activated", "sub_queries", "bibliography", "degraded", "notice", "procedencia"],
+                    "propertyNames": {
+                      "anyOf": [
+                        { "enum": ["question", "intent", "layers_activated", "sub_queries", "suggested_sources", "bibliography", "degraded", "notice", "procedencia"] },
+                        { "pattern": "^sub_queries_[a-z]{2}$" }
+                      ]
+                    },
+                    "properties": {
+                      "question": { "$ref": "#/$defs/tipos/cadena" },
+                      "intent": { "$ref": "#/$defs/tipos/cadena" },
+                      "layers_activated": { "$ref": "#/$defs/tipos/lista" },
+                      "sub_queries": { "$ref": "#/$defs/tipos/lista" },
+                      "suggested_sources": { "$ref": "#/$defs/tipos/lista" },
+                      "bibliography": { "$ref": "#/$defs/tipos/objeto" },
+                      "degraded": { "$ref": "#/$defs/tipos/booleano" },
+                      "notice": { "$ref": "#/$defs/tipos/cadena" },
+                      "procedencia": { "$ref": "#/$defs/tipos/objeto" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "`evidence` — CAPACIDAD OPCIONAL: preguntarle a una fuente EXTERNA que la instancia no controla, para contrastar contra lo que dice el corpus. Es la unica tool de mundo abierto y el contrato lo exige (`openWorldHint: true`): ponerlo en false para que quede igual a las demas seria mentirle al cliente sobre a donde va la consulta. El contrato fija el MINIMO y no cierra los nombres: el vocabulario de la fuente externa es del adaptador (un contador propio, un marco de busqueda), y cerrarlo aca obligaria a todos los adaptadores al vocabulario del primero. `degraded` + `notice` son obligatorios y dicen la unica cosa que importa: 'no se pudo PREGUNTAR' no es 'no hay nada publicado'.",
+          "if": { "required": ["name"], "properties": { "name": { "const": "evidence" } } },
+          "then": {
+            "properties": {
+              "annotations": { "properties": { "openWorldHint": { "const": true } } },
+              "inputSchema": {
+                "properties": {
+                  "required": { "maxItems": 0 },
+                  "properties": {
+                    "required": ["question", "limit"],
+                    "properties": {
+                      "question": { "$ref": "#/$defs/tipos/cadena" },
+                      "limit": { "$ref": "#/$defs/tipos/entero" }
+                    },
+                    "additionalProperties": { "$ref": "#/$defs/tipos/escalar" }
+                  }
+                }
+              },
+              "outputSchema": {
+                "properties": {
+                  "properties": {
+                    "required": ["query_sent", "articles", "source", "shown", "degraded", "notice"],
+                    "properties": {
+                      "query_sent": { "$ref": "#/$defs/tipos/cadena" },
+                      "articles": { "$ref": "#/$defs/tipos/lista" },
+                      "source": { "$ref": "#/$defs/tipos/cadena" },
+                      "shown": { "$ref": "#/$defs/tipos/entero" },
+                      "degraded": { "$ref": "#/$defs/tipos/booleano" },
+                      "notice": { "$ref": "#/$defs/tipos/cadena" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Anotaciones": {
+      "title": "Anotaciones",
+      "description": "Las tres anotaciones de MCP, y las tres son OBLIGATORIAS: el directorio de conectores de Claude agrupa las tools por `readOnlyHint`/`destructiveHint` y una tool sin anotaciones no pasa la revision; ChatGPT las exige tambien (§8 del diseño). NOMOS GRAPH ES DE SOLO LECTURA: `readOnlyHint` es true y `destructiveHint` es false en TODAS, porque escribir en el grafo es trabajo de admin/v1 con rol, no de un chat. El dia que exista una tool que escriba, entra con su propia clase en el contrato y no colandose por una anotacion.",
+      "type": "object",
+      "required": ["readOnlyHint", "destructiveHint", "openWorldHint"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string" },
+        "readOnlyHint": { "const": true, "description": "Siempre true en mcp/v1." },
+        "destructiveHint": { "const": false, "description": "Siempre false: no hay nada que destruir en una lectura." },
+        "idempotentHint": { "type": "boolean" },
+        "openWorldHint": {
+          "type": "boolean",
+          "description": "True SOLO donde la tool sale del corpus de la instancia: `evidence`. Las siete obligatorias contestan con lo que el grafo tiene, y eso es mundo cerrado."
+        }
+      }
+    },
+    "EsquemaDeEntrada": {
+      "title": "EsquemaDeEntrada",
+      "description": "El `inputSchema` publicado, tal como lo genera el SDK. Abierto a proposito (el generador agrega `title`, `$defs`, defaults): lo que el contrato mira es `properties` --que argumentos hay y de que tipo-- y `required` --cuales son obligatorios--.",
+      "type": "object",
+      "required": ["type", "properties"],
+      "properties": {
+        "type": { "const": "object" },
+        "properties": { "type": "object" },
+        "required": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "EsquemaDeSalida": {
+      "title": "EsquemaDeSalida",
+      "description": "El `outputSchema` publicado. OBLIGATORIO EN TODA TOOL de mcp/v1: sin el, el cliente recibe un texto y el modelo tiene que adivinar la forma (y ChatGPT lo exige para `search` y `fetch`).\n\nLA PROHIBICION QUE VALE PARA LAS OCHO: los identificadores internos y los tiempos NO VIAJAN. `trace`, `request_id`, `ms_total` y compania son telemetria nuestra; un conector que los devuelve esta mandando datos de operacion a un cliente que no los pidio, y es rechazo directo en los dos directorios (§8.2). `procedencia` y `calidad` SI viajan y se quedan: son contenido que el modelo necesita para saber de donde salio cada cosa y si el texto es confiable.",
+      "type": "object",
+      "required": ["type", "properties"],
+      "properties": {
+        "type": { "const": "object" },
+        "properties": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "not": { "enum": ["trace", "trace_id", "request_id", "ms", "ms_total", "latency_ms", "elapsed_ms", "took_ms", "debug", "internal_id", "tenant_id", "cypher", "query_plan", "token", "principal", "sub"] },
+            "$comment": "La lista es de NOMBRES conocidos, no una heuristica: lo que el contrato puede prometer es que estos no aparecen. El recorrido profundo (un `trace` anidado dentro de un item) lo hace tests/validar.py, que si puede caminar el JSON."
+          }
+        },
+        "required": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "tipos": {
+      "$comment": "MATCHERS DE TIPO sobre un schema publicado, no tipos de datos. Cada uno acepta las DOS formas en que un generador escribe lo mismo: `{type: X}` y `{anyOf: [{type: X}, {type: null}]}` (que es como sale un campo opcional). Sin las dos ramas, todo argumento con default null fallaria el contrato y el contrato dejaria de poder verificar tipos.",
+      "cadena": {
+        "description": "Texto (o texto que puede ser null).",
+        "anyOf": [
+          { "required": ["type"], "properties": { "type": { "const": "string" } } },
+          { "required": ["anyOf"], "properties": { "anyOf": { "contains": { "required": ["type"], "properties": { "type": { "const": "string" } } } } } }
+        ]
+      },
+      "entero": {
+        "description": "Numero entero (o entero que puede ser null).",
+        "anyOf": [
+          { "required": ["type"], "properties": { "type": { "const": "integer" } } },
+          { "required": ["anyOf"], "properties": { "anyOf": { "contains": { "required": ["type"], "properties": { "type": { "const": "integer" } } } } } }
+        ]
+      },
+      "booleano": {
+        "description": "Booleano. `degraded` es booleano y no un string de estado a proposito: el cliente lo lee con un if.",
+        "anyOf": [
+          { "required": ["type"], "properties": { "type": { "const": "boolean" } } },
+          { "required": ["anyOf"], "properties": { "anyOf": { "contains": { "required": ["type"], "properties": { "type": { "const": "boolean" } } } } } }
+        ]
+      },
+      "objeto": {
+        "description": "Objeto (mapa). Es la forma de `filtros`, `garantizar`, `procedencia`, `metadata`, `facets` y `stats`: claves que dependen de la instancia y que el contrato no puede enumerar sin volverse de un dominio.",
+        "anyOf": [
+          { "required": ["type"], "properties": { "type": { "const": "object" } } },
+          { "required": ["anyOf"], "properties": { "anyOf": { "contains": { "required": ["type"], "properties": { "type": { "const": "object" } } } } } }
+        ]
+      },
+      "lista": {
+        "description": "Lista. El contrato NO fija la forma del item: `SearchResultItem` o `EntityItem` son de la instancia y crecen (la `calidad` por resultado entro el 16-sep-2026 sin romper a nadie). Lo que fija mcp-v1.md es el MINIMO de cada item en prosa, y lo que fija esto es que sea una lista y no un string con comas.",
+        "anyOf": [
+          { "required": ["type"], "properties": { "type": { "const": "array" } } },
+          { "required": ["anyOf"], "properties": { "anyOf": { "contains": { "required": ["type"], "properties": { "type": { "const": "array" } } } } } }
+        ]
+      },
+      "escalar": {
+        "description": "Texto, entero o booleano: UN valor, nunca una estructura. Es la regla de las entradas de `list_sources` y de `evidence`, donde el contrato no cierra los nombres: un argumento que acepta un objeto o una lista es la puerta por la que una tool pide 'el historial' o 'el contexto', y eso no entra en Nomos Graph.",
+        "anyOf": [
+          { "$ref": "#/$defs/tipos/cadena" },
+          { "$ref": "#/$defs/tipos/entero" },
+          { "$ref": "#/$defs/tipos/booleano" }
+        ]
+      }
+    }
+  }
+}

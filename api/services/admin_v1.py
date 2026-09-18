@@ -110,6 +110,14 @@ CAPABILITIES = {
     "upload": False, "classify": False, "review": False, "edit": False, "delete": False,
     "reingest": False, "explore": False, "wake": False, "facets": False, "units": False,
     "vectorize": False,
+    # `mcp` ES LA UNICA EN TRUE, y no contradice lo de arriba: no es una capacidad de
+    # ADMINISTRACION. Lo que habilita no es un boton de la consola sino que una persona conecte este
+    # grafo desde su cliente de chat --`/mcp`, contrato `mcp/v1`, siete tools de solo lectura--. Esta
+    # en `capabilities` igual porque la consola tiene que poder MOSTRARLA sin saber de dominio: lee
+    # `capabilities` con `!!`, asi que un endpoint publicado bajo una capacidad que nadie declaro es
+    # una puerta que la pantalla nunca muestra. Publicarla OBLIGA a llevar `auth.mcp` (el schema lo
+    # exige con un if/then en las dos direcciones), y por eso no lleva nota: no esta apagada.
+    "mcp": True,
 }
 
 #: POR QUE ESTA APAGADA Y COMO SE PRENDE. La consola ESCONDE el boton de lo que esta en false, asi
@@ -227,6 +235,10 @@ def _ahora() -> str:
 
 def descriptor() -> dict:
     """Lo que publica esta instancia para ser administrada. Todo lo de dominio viene del perfil."""
+    # DIFERIDO A PROPOSITO: este modulo es `services/` y `mcp_remote` es un router; al reves seria un
+    # ciclo. Es el mismo patron que usa `services/mcp_tools` con `routers/`.
+    from routers import mcp_remote
+
     p = perfil()
     s = get_settings()
     return {
@@ -253,7 +265,22 @@ def descriptor() -> dict:
         # el mismo error que publicar la capacidad.
         "capabilities": CAPABILITIES,
         "capability_notes": CAPABILITY_NOTES,
-        "auth": AUTH,
+        # `auth.mcp` DECLARA LA PUERTA DEL MCP (contrato `mcp/v1` §4): donde esta, que version del
+        # contrato de tools implementa y que tools publica HOY. `tools` sale del REGISTRO del
+        # servidor MCP y no de una lista retipeada: una vidriera que ofrece una tool que el servidor
+        # no registro es un boton que falla contra el backend.
+        #
+        # **SIN `oauth`, Y ES LO CORRECTO**: ese bloque describe el estado de un servidor de
+        # autorizacion (DCR/CIMD leidos de su metadata publica) y esta instancia no tiene ninguno --
+        # autentica con una clave compartida, ver `AUTH`--. El contrato lo dice explicito: "ausente =
+        # la instancia autentica el MCP de otra manera (una clave), y entonces no hay nada de OAuth
+        # que contar". Publicarlo en `null` NO es una opcion: el schema lo declara `type: object`, asi
+        # que un `null` ahi hace fallar la validacion del descriptor (comprobado contra la copia
+        # vendorizada, 17-sep-2026).
+        "auth": {**AUTH,
+                 "mcp": {"url": s.mcp_resource_url,
+                         "contract": mcp_remote.CONTRATO_MCP,
+                         "tools": mcp_remote.nombres_de_tools()}},
     }
 
 

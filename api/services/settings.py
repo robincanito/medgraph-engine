@@ -90,6 +90,12 @@ class Settings:
     instance_version: str | None = None
     public_base_url: str = "http://localhost:8000"
     cors_origins: list[str] = field(default_factory=lambda: ["http://localhost:3000"])
+    # ── MCP remoto (routers/mcp_remote.py, contrato mcp/v1) ──────────────────
+    # Hosts que acepta la proteccion anti DNS-rebinding del SDK de MCP. Vacio = se derivan de
+    # `public_base_url` mas localhost (ver `mcp_allowed_hosts_list`): un despliegue detras de un
+    # proxy que cambia el `Host` --o con un segundo dominio-- los declara con MCP_ALLOWED_HOSTS,
+    # porque si no el SDK contesta "421 Invalid Host header" y el cliente no sabe por que.
+    mcp_allowed_hosts: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not PATRON_NOMBRE_INSTANCIA.match(self.instance_name):
@@ -104,6 +110,41 @@ class Settings:
     def environment_declarable(self) -> str:
         """El entorno tal como lo admite el contrato admin/v1."""
         return self.environment if self.environment in ENTORNOS else "development"
+
+    @property
+    def api_base(self) -> str:
+        """La base publica, sin barra final. Es lo que publica `instance.api_base`."""
+        return self.public_base_url.rstrip("/")
+
+    @property
+    def mcp_resource_url(self) -> str:
+        """La URL EXACTA del endpoint MCP: la que una persona escribe en su cliente.
+
+        DERIVADA Y NO UN CAMPO APARTE: el contrato `mcp/v1` §4 pide que `auth.mcp.url` cuelgue de
+        `instance.api_base`, y con dos campos configurables habria dos valores que pueden diferir.
+        """
+        return f"{self.api_base}/mcp"
+
+    @property
+    def mcp_allowed_hosts_list(self) -> list[str]:
+        """Los hosts declarados, o los derivados de `public_base_url` mas localhost.
+
+        El default tiene que servir para el caso que este repo documenta --`uvicorn` local y un
+        contenedor detras de su propio dominio-- sin obligar a configurar nada; lo que NO puede
+        hacer es aceptar cualquier `Host`, que es justo lo que la proteccion anti DNS-rebinding
+        existe para impedir.
+        """
+        if self.mcp_allowed_hosts:
+            return list(self.mcp_allowed_hosts)
+        from urllib.parse import urlsplit
+
+        propio = urlsplit(self.public_base_url).netloc
+        hosts = [propio] if propio else []
+        for h in ("localhost", "127.0.0.1", "localhost:8000", "127.0.0.1:8000",
+                  "localhost:8080", "127.0.0.1:8080"):
+            if h not in hosts:
+                hosts.append(h)
+        return hosts
 
 
 def _leer_entorno() -> Settings:
@@ -128,6 +169,7 @@ def _leer_entorno() -> Settings:
         # API_BASE_URL es como se llamaba en la v1.0 de este archivo main.py.
         public_base_url=_env("PUBLIC_BASE_URL", "API_BASE_URL", default="http://localhost:8000"),
         cors_origins=origenes or ["http://localhost:3000"],
+        mcp_allowed_hosts=[h.strip() for h in _env("MCP_ALLOWED_HOSTS").split(",") if h.strip()],
     )
 
 

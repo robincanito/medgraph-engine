@@ -11,8 +11,11 @@
 #
 # Los demas scripts de la raiz (`vectorize.py`, `upload_chunks.py`, `extract_entities.py`,
 # `ontology.py`, `search.py`, `parser.py`, `quickstart.py`, `load_dags.py`, `dedup_entities.py`,
-# `schema.py`, `db.py`, `mcp_server.py`) siguen afuera: son de la v1.0 y juntan decenas de
-# hallazgos que volverian el gate una lista que nadie lee. Entran cuando se los consolide.
+# `schema.py`, `db.py`) siguen afuera: son de la v1.0 y juntan decenas de hallazgos que volverian el
+# gate una lista que nadie lee. Entran cuando se los consolide.
+#
+# `mcp_server.py` estaba en esa lista y SE BORRO el 17-sep-2026: el servidor MCP pasó a ser un
+# endpoint de la API (`api/routers/mcp_remote.py`), que si esta dentro del alcance del gate.
 #
 # Regla de la casa: el gate FALLA CERRADO. Si ruff marca algo en el alcance, CI no pasa. Por eso
 # solo se seleccionan reglas que el alcance cumple hoy o que senalan bugs reales; el estilo puro
