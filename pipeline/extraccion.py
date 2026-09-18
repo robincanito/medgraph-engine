@@ -72,6 +72,7 @@ Lo que hay que contar viaja por `pipeline.eventos`.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import unicodedata
@@ -673,6 +674,130 @@ def validar(tx: Taxonomia, crudo: dict, chunk: dict, *,
     if inferidas:
         salida["inferidas_descartadas"] = inferidas
     return salida
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# EL CHECKPOINT DE LA EXTRACCION (18-sep-2026, hallazgo E5 del banco;
+# `docs/DISENO-deudas-del-banco-18sep.md` §2)
+# ══════════════════════════════════════════════════════════════════════════════════════
+
+#: Sufijo del archivo de checkpoint, al lado de `extracted/<libro>_entities.json`.
+SUFIJO_CHECKPOINT = "_entities.checkpoint.jsonl"
+
+
+class Checkpoint:
+    """Lo ya extraido de un libro, en disco, para no volver a pagarlo.
+
+    EL HALLAZGO QUE CIERRA. `extract_libro_fast` guardaba `extracted/<libro>_entities.json`
+    recien al terminar TODOS los lotes y no lo leia nunca al arrancar: una extraccion cortada a
+    mitad --la VM que se apaga, un 429 que agota los reintentos, un Ctrl-C-- se volvia a pagar
+    entera, y para un tratado son cientos de llamadas a Gemini.
+
+    LA FORMA, que el `xfail` dejaba abierta ("por lote en disco, o el estado en el job/v1"): POR
+    CHUNK EN DISCO, en JSONL al lado de la salida. El job de `job/v1` es de la API y la
+    extraccion corre por CLI en la notebook; el estado en el grafo obligaria a una escritura por
+    lote contra una VM que vive apagada. El archivo esta en un directorio que ya existe y ya esta
+    gitignoreado (`extracted/`), asi que no agrega ningun camino nuevo.
+
+    QUE TIENE. Primera linea, la CABECERA: `libro_id`, `profile`, `model_id` y
+    `taxonomia_forma`. Despues una linea por chunk extraido, escrita y `flush`eada apenas vuelve
+    su lote —si el proceso muere, lo escrito esta escrito—.
+
+    LA CABECERA ES LA CONDICION DE REANUDAR, y es lo que hace que esto no sea una trampa: una
+    cosecha de `medicina@2` NO es una de `medicina@3` (el 18-sep cambiaron tres reglas del
+    validador y el prompt entero). Si la cabecera no coincide, el checkpoint se DESCARTA y se
+    vuelve a pagar todo, que es lo correcto. Un chunk que quedo con `error` se reintenta: se
+    guarda para no perder el rastro, pero no cuenta como hecho.
+    """
+
+    def __init__(self, ruta, cabecera: dict, log=None):
+        self.ruta = Path(ruta)
+        self.cabecera = cabecera
+        self._log = log or logging.getLogger(__name__)
+        self._hechos: dict = {}
+        self._fh = None
+
+    # ── lectura ──────────────────────────────────────────────────────────────────────
+    def leer(self) -> dict:
+        """`{chunk_id: extraccion}` de lo ya pagado y util. Vacio si no hay o no sirve."""
+        if not self.ruta.exists():
+            return {}
+        try:
+            with open(self.ruta, encoding="utf-8") as fh:
+                primera = fh.readline()
+                if not primera.strip():
+                    return {}
+                cabecera = json.loads(primera)
+                if any(cabecera.get(k) != v for k, v in self.cabecera.items()):
+                    eventos.emitir(self._log, "extraccion_checkpoint_descartado",
+                                   libro_id=self.cabecera.get("libro_id"),
+                                   motivo="cabecera_distinta",
+                                   tenia=json.dumps(cabecera, ensure_ascii=False)[:200])
+                    return {}
+                hechos = {}
+                for linea in fh:
+                    linea = linea.strip()
+                    if not linea:
+                        continue
+                    try:
+                        dato = json.loads(linea)
+                    except ValueError:
+                        # La ULTIMA linea puede estar cortada a la mitad: es exactamente el caso
+                        # que este archivo existe para cubrir (el proceso murio escribiendo). Se
+                        # descarta esa linea y se conserva todo lo anterior.
+                        eventos.emitir(self._log, "extraccion_checkpoint_linea_rota",
+                                       libro_id=self.cabecera.get("libro_id"))
+                        continue
+                    cid = dato.get("chunk_id")
+                    if cid and not dato.get("error"):
+                        hechos[cid] = dato
+                self._hechos = hechos
+                return dict(hechos)
+        except OSError as e:
+            self._log.warning(f"no se pudo leer el checkpoint {self.ruta.name}: {e}")
+            return {}
+
+    # ── escritura ────────────────────────────────────────────────────────────────────
+    def abrir(self, *, reanudando: bool) -> None:
+        """Deja el archivo listo para escribir. Sin `reanudando`, lo pisa con su cabecera."""
+        self.ruta.parent.mkdir(parents=True, exist_ok=True)
+        if reanudando and self.ruta.exists():
+            self._fh = open(self.ruta, "a", encoding="utf-8")
+            return
+        self._fh = open(self.ruta, "w", encoding="utf-8")
+        self._fh.write(json.dumps(self.cabecera, ensure_ascii=False) + "\n")
+        self._fh.flush()
+
+    def anotar(self, extracciones: list) -> None:
+        """Escribe las extracciones de un lote y hace `flush`: lo que se pago, queda."""
+        if self._fh is None:
+            return
+        for e in extracciones:
+            self._fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+        self._fh.flush()
+
+    def cerrar(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+
+    def borrar(self) -> None:
+        """Se llama SOLO cuando la corrida termino completa: el JSON final ya es la verdad."""
+        self.cerrar()
+        try:
+            self.ruta.unlink(missing_ok=True)
+        except OSError as e:
+            self._log.warning(f"no se pudo borrar el checkpoint {self.ruta.name}: {e}")
+
+
+def ruta_de_checkpoint(directorio, libro_id: str) -> Path:
+    return Path(directorio) / f"{libro_id}{SUFIJO_CHECKPOINT}"
+
+
+def cabecera_de_checkpoint(tx: Taxonomia, libro_id: str, model_id: str) -> dict:
+    """Lo que tiene que coincidir para que reanudar sea legitimo. Ver `Checkpoint`."""
+    return {"libro_id": libro_id, "profile": tx.perfil, "model_id": model_id,
+            "taxonomia_forma": TAXONOMIA_FORMA}
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════

@@ -535,3 +535,50 @@ class TestElStdioSeRetiro:
                     if ln.startswith("| `mcp_server.py`"))
         assert "gone" in fila.lower()
         assert "### The MCP endpoint" in readme
+
+
+class TestElMcpNoSeComeLaApi:
+    """The MCP is wired with EXACT routes, not mounted at the root (18-sep-2026).
+
+    WHY THIS TEST EXISTS. Mounting the MCP app at "/mcp" makes Starlette answer **307 on
+    "/mcp/"**, and a redirect on POST is fragile: several clients drop the body. Mounting at the
+    ROOT fixes that, but a `Mount` matches **by path only, never by method**: with the MCP at
+    "/", any request that does not match a route declared BEFORE it falls into the MCP, and the
+    API stops answering **405** across its whole surface. Measured before the fix: `DELETE
+    /health` returned the MCP's 404 instead of the API's 405.
+
+    The fix is two exact `Route`s with their methods declared: no 307 (the path is exact) and
+    nothing is swallowed (the match is by path AND method).
+    """
+
+    @pytest.mark.parametrize("metodo,ruta", [
+        ("DELETE", "/health"),
+        ("PUT", "/search/hybrid"),
+        ("GET", "/search/hybrid"),
+        ("PATCH", "/query"),
+    ])
+    def test_un_verbo_equivocado_da_405(self, metodo, ruta, cabeceras):
+        with TestClient(main.app, raise_server_exceptions=False) as cliente:
+            r = cliente.request(metodo, ruta, headers=cabeceras)
+        assert r.status_code == 405, (metodo, ruta, r.status_code, r.text[:120])
+
+    def test_un_path_inexistente_da_el_404_de_la_api(self, cabeceras):
+        with TestClient(main.app, raise_server_exceptions=False) as cliente:
+            r = cliente.get("/no-existe-esta-ruta", headers=cabeceras)
+        assert r.status_code == 404 and r.json() == {"detail": "Not Found"}
+
+    def test_el_mcp_contesta_en_su_ruta_con_y_sin_barra(self):
+        """The other half: the fix must not turn the MCP off. Both spellings answer 401 (not 307,
+        not 404) without a credential."""
+        with TestClient(main.app, raise_server_exceptions=False) as anonimo:
+            for ruta in ("/mcp", "/mcp/"):
+                r = anonimo.post(ruta, json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+                assert r.status_code == 401, (ruta, r.status_code)
+
+    def test_los_metodos_declarados_son_los_del_transporte(self):
+        from api.routers import mcp_remote as remoto
+
+        assert set(remoto.METODOS_MCP) == {"GET", "POST", "DELETE"}
+        rutas = remoto.rutas_mcp()
+        assert [r.path for r in rutas] == ["/mcp", "/mcp/"]
+        assert all(r.methods >= set(remoto.METODOS_MCP) for r in rutas)

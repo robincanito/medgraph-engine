@@ -208,17 +208,17 @@ async def stats():
     return graph.get_stats()
 
 
-# === MCP REMOTO (Streamable HTTP) — DEBE SER LO ULTIMO DEL ARCHIVO ===
-# Va montado en la RAIZ (no en "/mcp") porque montarlo en "/mcp" hace que Starlette responda 307 a
-# "/mcp/", y un redirect en POST es fragil: varios clientes descartan el body. Con path interno
-# "/mcp" + mount en "/", el endpoint responde directo.
+# === MCP REMOTO (Streamable HTTP) ===
+# DOS RUTAS EXACTAS, NO UN MOUNT (18-sep-2026). Montarlo en "/mcp" da 307 en "/mcp/" y un redirect
+# en POST es fragil (varios clientes descartan el body); montarlo en la RAIZ resolvia eso pero se
+# comia los 405 de TODA la API, porque un mount matchea por path y no por metodo. Con `Route`
+# exactas no hay ni 307 ni captura: ver `mcp_remote.rutas_mcp`.
 #
-# ULTIMO EN EL ARCHIVO A PROPOSITO: Starlette matchea rutas en orden y un mount en la raiz se come
-# todo lo que se declare despues (`/health` empezaria a devolver 404).
+# YA NO HACE FALTA QUE SEA LO ULTIMO DEL ARCHIVO: una ruta declarada despues ya no queda tapada.
 #
 # La puerta es el middleware de arriba: `/mcp` no esta exento, asi que exige la misma clave que el
 # resto de la API.
-app.mount("/", mcp_remote.get_asgi_app())
+app.router.routes.extend(mcp_remote.rutas_mcp())
 
 
 if __name__ == "__main__":

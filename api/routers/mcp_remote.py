@@ -500,9 +500,42 @@ class _PuertaMCP:
 _puerta = _PuertaMCP()
 
 
+#: Los verbos del transporte Streamable HTTP: POST lleva el JSON-RPC, GET abre el stream SSE y
+#: DELETE cierra la sesion. Se declaran para que Starlette conteste 405 --y no el MCP-- ante
+#: cualquier otro; ver `rutas_mcp`.
+METODOS_MCP = ("GET", "POST", "DELETE")
+
+
 def get_asgi_app():
     """El ASGI a montar en la raiz. Ver `_PuertaMCP` por que es un objeto estable y no la app."""
     return _puerta
+
+
+def rutas_mcp() -> list:
+    """Las rutas del MCP remoto, para AGREGAR a la app (no montar). Ver el pie de `api/main.py`.
+
+    POR QUE NO ES UN MOUNT (18-sep-2026). Montar la app del SDK en `/mcp` hace que Starlette
+    conteste **307 a `/mcp/`**, y un redirect en POST es fragil: varios clientes descartan el
+    body. La vuelta era montar en la RAIZ --path interno `/mcp`-- y eso anduvo, pero un
+    `Mount` matchea **por path y no por metodo**: con el mount en `/`, CUALQUIER peticion que
+    no case con una ruta declarada antes --un verbo equivocado sobre una ruta que existe, un
+    path inventado-- caia adentro del MCP, y la API dejaba de contestar **405** en toda su
+    superficie.
+
+    LA CURA: dos `Route` EXACTAS con sus metodos declarados. No hay 307 --el path es exacto-- y
+    no se come nada --el match es por path Y por metodo--. `/mcp/` va aparte porque un cliente
+    que la escriba con barra final no merece un 404. La puerta (`_PuertaMCP`) sigue siendo la
+    misma: lo que cambia es COMO se engancha, no que hay detras.
+    """
+    from starlette.routing import Route
+
+    # EL ENDPOINT TIENE QUE SER UN OBJETO, NO UNA FUNCION: `Route` mira
+    # `inspect.isfunction(endpoint)` y, si lo es, la envuelve con `request_response` --o sea la
+    # llama con UN argumento-- en vez de tratarla como app ASGI de tres. `_PuertaMCP` ya es un
+    # objeto con `__call__`, asi que se pasa tal cual; `methods` sigue valiendo y es lo que da
+    # el 405.
+    return [Route(ruta, endpoint=get_asgi_app(), methods=list(METODOS_MCP))
+            for ruta in ("/mcp", "/mcp/")]
 
 
 def mcp_lifespan():

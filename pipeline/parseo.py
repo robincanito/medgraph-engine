@@ -943,6 +943,130 @@ def classify_content_type(text: str, page_start=None, total_pages=None) -> str:
     return "body"
 
 
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# LA FRONTERA DE NO_CONTENIDO SE DETECTA POR LINEAS (18-sep-2026, hallazgo V4 del banco,
+# `docs/DISENO-deudas-del-banco-18sep.md` §1).
+#
+# POR QUE. `classify_content_type` etiqueta el CHUNK ya cortado, y el chunker cortaba por tamaño
+# sin mirar que habia adentro: un chunk `indice` arrastraba las ultimas filas de la tabla de dosis
+# (contenido, perdido para el retrieval porque `indice` esta en NO_CONTENIDO) y el arranque de las
+# referencias; y las 1.795 "listas mixtas" medidas el 13-sep --prosa clinica con la bibliografia
+# del capitulo colgada al final-- eran exactamente esto: la nota de ese dia decia "esas se
+# arreglan cortando la seccion en su frontera, en el parseo; no aca".
+#
+# COMO. Antes de aplanar las paginas en palabras, cada LINEA recibe una naturaleza: `contenido`,
+# `referencias` o `indice`. Se usan las MISMAS firmas duras que ya clasifican chunks
+# (`CITA_BIBLIOGRAFICA`, `CODIGO_CLASIFICACION`) y los MISMOS minimos absolutos
+# (`MIN_CITAS_REFERENCIAS`, `MIN_CODIGOS_INDICE`): una corrida de lineas con firma, con huecos de
+# a lo sumo `HUECO_MAX_*` lineas (una cita parte en dos o tres lineas y la firma "2018;391:1023"
+# esta al final), y el TOTAL de firmas de la corrida tiene que llegar al minimo del chunk. Un
+# parrafo con tres citas no llega y no abre nada: sigue siendo contenido, que es lo que es.
+#
+# LO QUE NO ENTRA, a proposito: la tabla (`tabla` es contenido; cortar en su borde daria chunks de
+# quince palabras embebidos solos) y el indice analitico (`_es_indice`: firma blanda y posicional,
+# en los tratados ocupa paginas enteras y la etiqueta por chunk lo resuelve; entra el dia que una
+# medicion sobre meneghello lo pida). `generate_chunks_v2` es quien consume la naturaleza: no deja
+# que un chunk --ni un `:ParentChunk`-- cruce la frontera, no solapa a traves de ella y le pone a
+# los chunks de un bloque el tipo del bloque.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+NATURALEZA_CONTENIDO = "contenido"
+
+# El encabezado que abre una lista de referencias, si esta en las lineas previas a la primera
+# firma: "Bibliografia", "Referencias bibliograficas", "Lecturas recomendadas", "Apendice 2.
+# Referencias". Linea CORTA (un titulo, no una oracion que empieza con "Referencias a la ley...").
+ENCABEZADO_REFERENCIAS = re.compile(
+    r"(?i)^\W*(?:ap[eé]ndice\s+\w+[.:]?\s*)?"
+    r"(?:bibliograf[ií]a|referencias?|lecturas\s+recomendadas|bibliography|references)\b[^.]{0,40}$")
+MAX_LARGO_ENCABEZADO_REFERENCIAS = 60
+LINEAS_PREVIAS_ENCABEZADO = 3
+# Lo que una cita puede dejar DESPUES de su firma, en linea aparte: el DOI, el PMID, la URL.
+COLA_REFERENCIAS = re.compile(r"(?i)^(?:doi\b|pmid\b|https?://|www\.|disponible\s+en\b)")
+# Huecos admitidos DENTRO de una corrida. Dos para las citas (autores + titulo + revista suelen
+# ocupar dos lineas sin firma antes de la linea con el año;volumen:pagina); uno para los codigos
+# (cada linea de una tabla CIE-10 lleva codigos, y una linea de prosa entre medio es una
+# aclaracion, no un cambio de bloque).
+HUECO_MAX_REFERENCIAS = 2
+HUECO_MAX_INDICE = 1
+
+
+def _corridas(firmas: list, hueco_max: int, minimo: int) -> list:
+    """Intervalos [a, b] (inclusive) de lineas: arrancan y terminan en una linea con firma, admiten
+    hasta `hueco_max` lineas seguidas sin firma adentro, y suman al menos `minimo` firmas."""
+    salida = []
+    n = len(firmas)
+    i = 0
+    while i < n:
+        if firmas[i] <= 0:
+            i += 1
+            continue
+        a = b = i
+        total = firmas[i]
+        hueco = 0
+        j = i + 1
+        while j < n:
+            if firmas[j] > 0:
+                b = j
+                total += firmas[j]
+                hueco = 0
+            else:
+                hueco += 1
+                if hueco > hueco_max:
+                    break
+            j += 1
+        if total >= minimo:
+            salida.append((a, b))
+        i = b + 1
+    return salida
+
+
+def naturaleza_de_tipo(tipo: str) -> str:
+    """La naturaleza de un chunk a partir de su `tipo_contenido`: `contenido`, `referencias` o
+    `indice`. Es la vara UNICA de "esto es otro bloque".
+
+    Existe porque la pregunta "estos dos chunks son del mismo bloque?" se hace en varios lados
+    (los tests de la frontera, y manana cualquier consumidor que agrupe) y la respuesta facil
+    --"uno esta en NO_CONTENIDO y el otro no"-- se equivoca justo en el par `indice` /
+    `referencias`: los dos son NO_CONTENIDO y son DOS bloques distintos, entre los que tampoco
+    hay solape.
+    """
+    return tipo if tipo in NO_CONTENIDO else NATURALEZA_CONTENIDO
+
+
+def naturaleza_por_linea(lineas: list) -> list:
+    """Una naturaleza por linea: `contenido`, `referencias` o `indice`. Pura: solo mira el texto.
+
+    Las referencias ganan sobre los codigos si una corrida cae adentro de otra (una lista de
+    citas puede nombrar un codigo; una tabla de codigos no cita nada).
+    """
+    n = len(lineas)
+    naturaleza = [NATURALEZA_CONTENIDO] * n
+    citas = [len(CITA_BIBLIOGRAFICA.findall(linea)) for linea in lineas]
+    for a, b in _corridas(citas, HUECO_MAX_REFERENCIAS, MIN_CITAS_REFERENCIAS):
+        # El encabezado, si esta cerca, es del bloque: arranca ahi y se lleva las lineas de
+        # autores y titulo de la primera cita, que no tienen firma propia.
+        vistas = 0
+        k = a - 1
+        while k >= 0 and vistas < LINEAS_PREVIAS_ENCABEZADO:
+            linea = lineas[k].strip()
+            if linea:
+                vistas += 1
+                if (len(linea) <= MAX_LARGO_ENCABEZADO_REFERENCIAS
+                        and ENCABEZADO_REFERENCIAS.match(linea)):
+                    a = k
+                    break
+            k -= 1
+        while b + 1 < n and COLA_REFERENCIAS.match(lineas[b + 1].strip()):
+            b += 1
+        for k in range(a, b + 1):
+            naturaleza[k] = "referencias"
+    codigos = [len(CODIGO_CLASIFICACION.findall(linea)) for linea in lineas]
+    for a, b in _corridas(codigos, HUECO_MAX_INDICE, MIN_CODIGOS_INDICE):
+        for k in range(a, b + 1):
+            if naturaleza[k] == NATURALEZA_CONTENIDO:
+                naturaleza[k] = "indice"
+    return naturaleza
+
+
 def ratio_palabras_sin_vocales(text: str) -> float:
     """Fraccion de palabras largas SIN ninguna vocal: la firma del CID desplazado.
 
@@ -1295,25 +1419,59 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
 
     `target_size` y `overlap` siguen aceptandose sueltos porque hay llamadores viejos que los
     pasan; cuando vienen, ganan sobre la estrategia (override puntual de una corrida).
+
+    NO_CONTENIDO ES UNA FRONTERA DURA (18-sep-2026, hallazgo V4 del banco; ver el comentario
+    largo sobre `naturaleza_por_linea`). Cada palabra llega con la naturaleza de su linea
+    (`contenido` / `referencias` / `indice`) y el chunker:
+      · nunca deja que un chunk cruce de una naturaleza a otra: el corte se adelanta a la frontera;
+      · no solapa A TRAVES de la frontera: el chunk que arranca un bloque arranca en su primera
+        palabra, sin las 60 del bloque anterior;
+      · le pone a los chunks de un bloque el TIPO del bloque, sin pasar por
+        `classify_content_type`: el clasificador de chunk pide >= 8 citas y una cola de 60 palabras
+        con tres citas volvia a salir `body`, o sea contenido;
+      · funde una cola mas chica que `min_size` con el chunk anterior SOLO si comparten
+        naturaleza (antes se fundia siempre, y solo podia pasar al final del documento; ahora
+        pasa al final de cada bloque); si no, la cola queda sola --una `referencias` de 60
+        palabras es inofensiva, el retrieval la excluye--;
+      · los parents tampoco cruzan: `agrupar: padre` devolvia prosa con la bibliografia pegada.
+    Un documento sin bloques de NO_CONTENIDO sale EXACTAMENTE igual que antes: los cortes, los
+    ids y los parents no cambian (lo fijan los goldens de los formatos sin bloques).
     """
     target_size = estrategia.target_size if target_size is None else target_size
     overlap = estrategia.overlap if overlap is None else overlap
     # Construir un buffer continuo con metadata por página
     all_words = []       # Lista plana de palabras
     word_meta = []       # Metadata por palabra: (page, capitulo, seccion)
+    naturaleza = []      # Naturaleza por palabra: la de su linea (ver naturaleza_por_linea)
 
-    for sp in structured_pages:
+    # LA NATURALEZA SE DECIDE SOBRE LAS LINEAS DE TODO EL DOCUMENTO, no pagina por pagina: una
+    # lista de referencias que cruza de pagina es UNA corrida, y un salto de pagina no la cierra.
+    lineas_por_entrada = [sp["text"].split("\n") for sp in structured_pages]
+    naturaleza_lineas = naturaleza_por_linea(
+        [linea for lineas in lineas_por_entrada for linea in lineas])
+
+    k = 0
+    for sp, lineas in zip(structured_pages, lineas_por_entrada, strict=True):
         page = sp["page"]
         cap = sp["titulo_capitulo"]
         sec = sp["titulo_seccion"]
-        words = sp["text"].split()
-
-        for w in words:
-            all_words.append(w)
-            word_meta.append((page, cap, sec))
+        for linea in lineas:
+            nat = naturaleza_lineas[k]
+            k += 1
+            for w in linea.split():
+                all_words.append(w)
+                word_meta.append((page, cap, sec))
+                naturaleza.append(nat)
 
     if not all_words:
         return [], []
+
+    n = len(all_words)
+    # fin_de_bloque[i]: la primera posicion despues de i con OTRA naturaleza (o n). Es el tope
+    # que ningun chunk que arranque en i puede pasar.
+    fin_de_bloque = [n] * n
+    for i in range(n - 2, -1, -1):
+        fin_de_bloque[i] = fin_de_bloque[i + 1] if naturaleza[i + 1] == naturaleza[i] else i + 1
 
     # LAS PAGINAS DEL DOCUMENTO, para el refuerzo posicional del detector de indice
     # (16-sep-2026). Sale de las paginas que efectivamente llegaron —no de doc.page_count—
@@ -1324,16 +1482,19 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
 
     # Generar child chunks con overlap
     children = []
+    naturaleza_de_chunk = []   # paralela a `children`; no viaja en el chunk (no es de chunk/v1)
     pos = 0
     chunk_index = 0
 
-    while pos < len(all_words):
+    while pos < n:
+        nat = naturaleza[pos]
+        limite = fin_de_bloque[pos]
         # Determinar fin del chunk
         end_target = pos + target_size
 
-        if end_target >= len(all_words):
-            # Último chunk: tomar todo lo que queda
-            end = len(all_words)
+        if end_target >= limite:
+            # Último chunk del bloque (o del documento): tomar todo lo que queda hasta la frontera
+            end = limite
         else:
             # Buscar límite de oración cerca del target
             end = _find_sentence_boundary(all_words, end_target)
@@ -1343,9 +1504,25 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
                 end = _find_sentence_boundary(all_words, pos + estrategia.max_size)
                 if end - pos > estrategia.max_size + 50:
                     end = pos + estrategia.max_size  # Corte duro como último recurso
+            # La oracion mas cercana puede estar del otro lado de la frontera: no se cruza.
+            end = max(min(end, limite), pos + 1)
 
-        # Chunk demasiado pequeño al final: merge con anterior
-        if end - pos < estrategia.min_size and children:
+        # LA COLA CORTA QUE NO ES DE NADIE SE VA CON EL BLOQUE SIGUIENTE. Pasa en el encabezado
+        # que abre un bloque y que `naturaleza_por_linea` no reconocio --"Apendice 2.
+        # Referencias" con la maqueta de una celda de planilla, "<!-- Slide number: 16 -->"--:
+        # son cinco o siete palabras de `contenido` encajonadas entre dos bloques, que no se
+        # pueden fundir hacia atras (otra naturaleza) y solas serian un chunk de siete palabras
+        # con su embedding. Se las absorbe hacia ADELANTE, que ademas es donde pertenecen.
+        if (end - pos < estrategia.min_size and limite < n
+                and (not children or naturaleza_de_chunk[-1] != nat)):
+            nat_siguiente = naturaleza[limite]
+            for i in range(pos, limite):
+                naturaleza[i] = nat_siguiente
+                fin_de_bloque[i] = fin_de_bloque[limite]
+            continue
+
+        # Cola demasiado pequeña: merge con el anterior, si es de la misma naturaleza.
+        if end - pos < estrategia.min_size and children and naturaleza_de_chunk[-1] == nat:
             prev = children[-1]
             prev["text"] = prev["text"] + " " + " ".join(all_words[pos:end])
             prev["word_count"] = len(prev["text"].split())
@@ -1356,7 +1533,8 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             # cambiarla reetiquetaria el ultimo chunk de cada libro del corpus —con su texto
             # canonico de embedding— por una razon ajena a esta tanda.
             prev["calidad"], prev["calidad_valor"] = calidad_de_texto(prev["text"])
-            break
+            pos = end   # una cola es siempre el final de un bloque: no hay solape que dar
+            continue
 
         chunk_text = " ".join(all_words[pos:end])
         page_start = word_meta[pos][0]
@@ -1373,7 +1551,12 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             if word_meta[i][2] and word_meta[i][2] != seccion:
                 seccion = word_meta[i][2]
 
-        tipo = classify_content_type(chunk_text, page_start, total_paginas)
+        # El tipo de un chunk de bloque es el del bloque (ver el docstring); el de contenido lo
+        # decide el clasificador de siempre.
+        if nat == NATURALEZA_CONTENIDO:
+            tipo = classify_content_type(chunk_text, page_start, total_paginas)
+        else:
+            tipo = nat
         # LA CALIDAD SE MIDE ACA Y NO EN UN BACKFILL (16-sep-2026, §1.6 del diseño): es del
         # chunk, se calcula con el texto que se va a guardar y viaja con el. El `:Book` la
         # deriva de sus chunks en `pipeline/carga.py`; no hay una segunda medicion por muestreo.
@@ -1395,22 +1578,30 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             "chunk_index": chunk_index,
             "version": 2,
         })
+        naturaleza_de_chunk.append(nat)
 
         chunk_index += 1
 
-        # Avanzar con overlap
-        next_pos = end - overlap
-        if next_pos <= pos:
-            next_pos = end  # Evitar loop infinito
+        # Avanzar con overlap, salvo en la frontera: el bloque siguiente arranca limpio.
+        if end >= limite:
+            next_pos = limite
+        else:
+            next_pos = end - overlap
+            if next_pos <= pos:
+                next_pos = end  # Evitar loop infinito
         pos = next_pos
 
-    # Generar parent chunks (ventana de parent_window children)
+    # Generar parent chunks (ventana de parent_window children, sin cruzar la frontera)
     parents = []
     parent_idx = 0
     i = 0
 
     while i < len(children):
         window_end = min(i + estrategia.parent_window, len(children))
+        for j in range(i + 1, window_end):
+            if naturaleza_de_chunk[j] != naturaleza_de_chunk[i]:
+                window_end = j
+                break
         window = children[i:window_end]
 
         # Concatenar textos de los children (sin overlap duplicado)
@@ -1453,7 +1644,7 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             child["parent_id"] = parent_id
 
         parent_idx += 1
-        i += estrategia.parent_window
+        i = window_end
 
     return children, parents
 
