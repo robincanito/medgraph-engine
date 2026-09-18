@@ -36,6 +36,37 @@ los labels son unicos, `min_nombre < max_nombre`, la plantilla existe y sus marc
 conocidos. Un `from: [patologa]` con un typo hoy no falla NUNCA —porque nadie lee el campo—;
 desde hoy falla ANTES de pagar una llamada.
 
+LAS CUATRO REGLAS DE v3 (18-sep-2026, `docs/DISENO-curar-extractor-18sep.md`). El juez-LLM midio
+la extraccion el 14-sep contra seis controles positivos firmados: reales 3,63/5 y **`j3_relacion`
+2,08**. El eje debil no era la entidad: era la RELACION. Los cuatro defectos que el juez nombro se
+curan mitad en el perfil (`medicina@3`: tipo `molecula_biologica`, `sinonimos` de clase, `ejemplo`
+por relacion, tres reglas nuevas) y mitad aca:
+
+  1. ORIENTACION IMPOSIBLE (`RECHAZO_ORIENTACION`, ENCENDIDO). Una relacion cuyo par de tipos
+     viola los `from`/`to` EN ESTE SENTIDO y los cumpliria DADA VUELTA esta invertida, y eso no
+     es una regla dudosa: es un error. Se rechaza. Medido sobre el corpus ya extraido (227.388
+     relaciones de los tres tratados largos): 8,27%, con `farmaco SE_TRATA_CON patologia` (9.081),
+     `grupo_farmacologico SE_TRATA_CON patologia` (2.585) y `agente CAUSADA_POR patologia` (2.178)
+     a la cabeza — los tres estan en la cola de peores del juez.
+     El par ILEGAL EN LOS DOS SENTIDOS sigue contandose sin rechazar (`RECHAZO_FROM_TO`, apagado):
+     17,10%, dominado por pares que `ASOCIADA_A` —"laxa a proposito"— no incluye. Ahi la regla es
+     sospechosa antes que el dato, y es la leccion de los 71.569 de julio.
+  2. UN NOMBRE QUE ES UNA CLASE NO ES UNA ENTIDAD. `'tionamidas PERTENECE_A grupo_farmacologico'`:
+     el destino tiene que ser el grupo CON NOMBRE. El perfil declara por tipo las superficies con
+     que la prosa nombra a la clase (`entities[].sinonimos`), y se descarta la entidad —o el
+     extremo de relacion— cuyo nombre sea exactamente una de ellas, el id o el label. Medido:
+     1.697 destinos (0,75%), 1.542 en `PERTENECE_A` y 1.452 literalmente 'grupo farmacologico';
+     mas 137 entidades (0,03%), 111 de ellas llamadas 'farmaco'.
+  3. EVIDENCIA TEXTUAL. La entidad tiene que estar nombrada en el fragmento —los mismos
+     `max_chars_fragmento` que vio el modelo—, por su nombre, por un sinonimo que el modelo
+     devolvio, o por una variante de sufijo. Lo que no aparece se descarta y se CUENTA
+     (`inferidas_descartadas`). Medido sobre 425.597 entidades: exigir la superficie literal
+     descartaria 19,2%; con los sinonimos del modelo, 9,5%; con la variante de sufijo, 7,6%. La
+     diferencia la explica la regla de traducir al español, que hace que el nombre canonico no
+     aparezca literal en un fragmento en ingles ("encainide" -> "encainida").
+  4. El tipo que faltaba es una decision de PERFIL y no de codigo: entra solo, porque
+     `ENTITY_TYPES` y el prompt se derivan de `tx`.
+
 SIN `print`: este paquete se replica al engine y lo vigila `test_bitacora.PAQUETE_SIN_PRINT`.
 Lo que hay que contar viaja por `pipeline.eventos`.
 """
@@ -45,6 +76,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 
 from pipeline import eventos
@@ -70,19 +102,39 @@ MIN_NOMBRE, MAX_NOMBRE = 2, 100
 MAX_MENCIONES = 10
 BATCH_SIZE, MIN_WORDS = 3, 100
 
-#: EL FLAG DE POLITICA (decision 3 de §8 del diseño). Con `False` una relacion que viola los
-#: `from`/`to` del perfil se CUENTA y se emite, pero ENTRA. Medicina ya pago una vez el precio
-#: de reglas mal escritas: la primera version de los `from`/`to` marcaba 71.569 relaciones como
-#: invalidas y la mayoria eran reglas malas, no datos malos (`medicina.yaml`). Darlo vuelta
-#: cambia lo que entra al grafo, asi que espera la evidencia del juez mas una pasada real.
+#: EL FLAG DE POLITICA (decision 3 de §8 del diseño de la extraccion por perfil). Con `False` una
+#: relacion cuyo par de tipos es ILEGAL EN LOS DOS SENTIDOS se CUENTA y se emite, pero ENTRA.
+#: Medicina ya pago una vez el precio de reglas mal escritas: la primera version de los
+#: `from`/`to` marcaba 71.569 relaciones como invalidas y la mayoria eran reglas malas, no datos
+#: malos (`medicina.yaml`). El 18-sep-2026 se volvio a medir sobre el corpus ya extraido y el
+#: diagnostico se confirmo: el 17,10% de las 227.388 relaciones cae en este balde, y arriba de la
+#: lista estan pares que `ASOCIADA_A` —declarada "laxa a proposito"— simplemente no incluye
+#: (`farmaco ASOCIADA_A estructura_anatomica`, 3.125). Sigue apagado, y lo que se prendio es la
+#: mitad que NO es ambigua: la de abajo.
 RECHAZO_FROM_TO = False
 
-#: Los motivos de descarte que viajan en el evento `extraccion_descarte`.
+#: LA MITAD QUE SI SE RECHAZA (18-sep-2026, §2 del diseño de curar el extractor): la orientacion
+#: imposible. Si el par viola los `from`/`to` en este sentido y los CUMPLE dado vuelta, la
+#: relacion esta invertida y no hay regla dudosa que discutir. Es el defecto mas frecuente que
+#: nombro el juez, y son 18.798 relaciones (8,27%) del corpus ya extraido.
+RECHAZO_ORIENTACION = True
+
+#: Los motivos de descarte que viajan en el evento `extraccion_descarte`. Los tres ultimos son
+#: de v3; el vocabulario tambien esta en `pipeline/eventos.py`, que es el contrato con el harness.
 MOTIVOS = ("tipo_entidad", "tipo_relacion", "nombre_corto", "nombre_largo", "from_to",
-           "extremo_ausente")
+           "extremo_ausente", "orientacion", "nombre_de_tipo", "sin_evidencia")
+
+#: LA EVIDENCIA TEXTUAL, en dos numeros. Dos palabras son "la misma con otro sufijo" si comparten
+#: todo menos el ultimo caracter de la mas corta y sus largos difieren en <= 3: eso hace
+#: "enfermedades"/"enfermedad", "cronica"/"cronicas" y "encainide"/"encainida", y NO hace
+#: "cardiopatia"/"cardiologia" (difieren en el caracter 7) ni "gastrico"/"gastrointestinal"
+#: (8 caracteres de diferencia). Las palabras de menos de 4 caracteres exigen igualdad: con tres
+#: letras, "salvo el sufijo" no dice nada.
+MIN_TOKEN_SUFIJO, MAX_DIF_SUFIJO = 4, 3
 
 _ID_ENTIDAD = re.compile(r"^[a-z][a-z0-9_]*$")
 _ID_RELACION = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_NO_PALABRA = re.compile(r"[^0-9a-zA-ZÀ-ſ]+")
 #: Un marcador es `{` + minusculas/guion bajo + `}`. La llave de un ejemplo de JSON
 #: (`{"resultados"…`) NO matchea, que es lo que permite escribir la plantilla con llaves
 #: simples y legibles en vez de duplicadas como exigia el `str.format` del codigo viejo.
@@ -104,6 +156,31 @@ class Relacion:
     desde: frozenset
     hasta: frozenset
     extraer: bool = True
+    #: La relacion USADA, en una linea, con su direccion (`relations[].ejemplo` del perfil,
+    #: 18-sep-2026). Viaja al prompt dentro de `{relations_desc}` y es la mitad-prompt del
+    #: rechazo por orientacion: el validador tira lo invertido y el ejemplo es lo que evita que
+    #: el modelo lo produzca. Vacio = la relacion no lo declara (las cuatro huerfanas no lo
+    #: declaran: lo que no se pide no se ejemplifica).
+    ejemplo: str = ""
+
+    def acepta(self, desde_tipo: str, hasta_tipo: str) -> bool:
+        """Si este par de tipos cumple los `from`/`to`. Un extremo sin declarar acepta todo."""
+        return ((not self.desde or desde_tipo in self.desde)
+                and (not self.hasta or hasta_tipo in self.hasta))
+
+    def orientacion_imposible(self, desde_tipo: str | None, hasta_tipo: str | None) -> bool:
+        """LA REGLA DE LA DIRECCION (18-sep-2026). True si el par viola los `from`/`to` en ESTE
+        sentido y los CUMPLE dado vuelta: ahi la relacion esta invertida y no hay nada que
+        discutir. `farmaco SE_TRATA_CON patologia` es True (`patologia -> farmaco` es legal);
+        `grupo_farmacologico SE_TRATA_CON molecula_biologica` es False —ilegal en los dos
+        sentidos— y cae en el balde de `from_to`, que se cuenta y no rechaza.
+
+        Con un extremo sin tipo (la entidad vino de otro fragmento) devuelve False: no se puede
+        decidir, y rechazar por lo que no se sabe perderia aristas reales.
+        """
+        if desde_tipo is None or hasta_tipo is None:
+            return False
+        return not self.acepta(desde_tipo, hasta_tipo) and self.acepta(hasta_tipo, desde_tipo)
 
 
 @dataclass(frozen=True)
@@ -113,7 +190,9 @@ class Taxonomia:
 
     dominio: str
     version: int
-    #: id -> {"label": str, "desc": str}, EN EL ORDEN DEL YAML (el prompt lo respeta).
+    #: id -> {"label": str, "desc": str, "sinonimos": tuple}, EN EL ORDEN DEL YAML (el prompt lo
+    #: respeta). `sinonimos` son las superficies con que la prosa nombra a LA CLASE, no a una
+    #: entidad (ver `nombres_de_tipo`).
     tipos: dict = field(default_factory=dict)
     #: id -> Relacion, en el orden del YAML.
     relaciones: dict = field(default_factory=dict)
@@ -133,7 +212,7 @@ class Taxonomia:
     # ── lecturas ──────────────────────────────────────────────────────────────────────
     @property
     def perfil(self) -> str:
-        """`medicina@2`, tal como viaja en el linaje y en el descriptor de admin/v1."""
+        """`medicina@3`, tal como viaja en el linaje y en el descriptor de admin/v1."""
         return f"{self.dominio}@{self.version}"
 
     @property
@@ -161,6 +240,25 @@ class Taxonomia:
     def labels(self) -> tuple:
         return tuple(e["label"] for e in self.tipos.values())
 
+    @cached_property
+    def nombres_de_tipo(self) -> frozenset:
+        """TODAS las formas de nombrar una CLASE del vocabulario, plegadas para comparar: el id
+        (con y sin guiones bajos), el label y los `sinonimos` que el perfil declara.
+
+        Para que sirve, y es el defecto 2 del juez (18-sep-2026): `'tionamidas PERTENECE_A
+        grupo_farmacologico'`. El destino de una relacion tiene que ser una entidad con nombre;
+        si el nombre ES la clase, no hay entidad. Se compara por IGUALDAD exacta sobre el nombre
+        plegado, nunca por substring: "enfermedad de crohn" contiene "enfermedad" y es una
+        patologia perfectamente valida.
+        """
+        salida = set()
+        for tid, entrada in self.tipos.items():
+            salida.add(_plegar(tid))
+            salida.add(_plegar(tid.replace("_", " ")))
+            salida.add(_plegar(entrada["label"]))
+            salida.update(_plegar(s) for s in entrada.get("sinonimos") or ())
+        return frozenset(x for x in salida if x)
+
 
 def taxonomia(perfil: dict, *, ruta=None, plantilla: str | None = None) -> Taxonomia:
     """La taxonomia que declara un perfil de dominio ya cargado. Falla cerrado.
@@ -176,7 +274,8 @@ def taxonomia(perfil: dict, *, ruta=None, plantilla: str | None = None) -> Taxon
     tipos = {}
     for entrada in perfil.get("entities") or []:
         tipos[entrada["id"]] = {"label": entrada.get("label") or entrada["id"],
-                                "desc": entrada.get("desc") or ""}
+                                "desc": entrada.get("desc") or "",
+                                "sinonimos": tuple(entrada.get("sinonimos") or ())}
 
     relaciones = {}
     for entrada in perfil.get("relations") or []:
@@ -185,6 +284,7 @@ def taxonomia(perfil: dict, *, ruta=None, plantilla: str | None = None) -> Taxon
             desde=frozenset(entrada.get("from") or []),
             hasta=frozenset(entrada.get("to") or []),
             extraer=entrada.get("extraer", True) is not False,
+            ejemplo=(entrada.get("ejemplo") or "").strip(),
         )
 
     extraccion = perfil.get("extraction") or {}
@@ -253,6 +353,27 @@ def _validar(tx: Taxonomia) -> None:
         raise ValueError(
             f"perfil '{tx.dominio}': labels repetidos {repetidos}: dos tipos distintos "
             "escribirian en los mismos nodos del grafo")
+    # Los `sinonimos` de clase deciden que nombre SE DESCARTA, asi que uno que pertenezca a dos
+    # tipos hace ambiguo el descarte y uno que sea el id de otro tipo es el vocabulario
+    # pisandose. Falla al construir, como todo lo demas de este validador.
+    dueno: dict = {}
+    for tid, entrada in tx.tipos.items():
+        for sinonimo in entrada.get("sinonimos") or ():
+            clave = _plegar(sinonimo)
+            if not clave:
+                raise ValueError(
+                    f"perfil '{tx.dominio}': {tid}.sinonimos trae un texto vacio")
+            if dueno.setdefault(clave, tid) != tid:
+                raise ValueError(
+                    f"perfil '{tx.dominio}': el sinonimo de clase {sinonimo!r} esta en "
+                    f"'{dueno[clave]}' y en '{tid}': el descarte por 'el nombre es una clase' "
+                    "seria ambiguo")
+            ajenos = [otro for otro in tx.tipos if otro != tid
+                      and clave in (_plegar(otro), _plegar(otro.replace("_", " ")))]
+            if ajenos:
+                raise ValueError(
+                    f"perfil '{tx.dominio}': {tid}.sinonimos trae {sinonimo!r}, que es el id "
+                    f"del tipo '{ajenos[0]}'")
     for rid, rel in tx.relaciones.items():
         if not _ID_RELACION.match(rid):
             raise ValueError(
@@ -322,12 +443,23 @@ def armar_prompt(tx: Taxonomia, chunks: list, libro_titulo: str = "") -> str:
         "entities": ", ".join(tx.tipos),
         "entities_desc": "\n".join(f"- {tid}: {e['desc']}" for tid, e in tx.tipos.items()),
         "relations": ", ".join(tx.extraibles),
-        "relations_desc": "\n".join(
-            f"- {r.id}: {' | '.join(sorted(r.desde)) or 'cualquiera'} -> "
-            f"{' | '.join(sorted(r.hasta)) or 'cualquiera'}"
-            for r in tx.relaciones.values() if r.extraer),
+        "relations_desc": "\n".join(_linea_relacion(r) for r in tx.relaciones.values()
+                                    if r.extraer),
         "rules": tx.reglas,
     })
+
+
+def _linea_relacion(r: Relacion) -> str:
+    """`- ID: a | b -> c | d`, mas una segunda linea `    ej: …` si la relacion declara `ejemplo`.
+
+    Sin `ejemplo` rinde exactamente lo de antes (derecho y generico no lo declaran, y sus goldens
+    no se mueven). El ejemplo es lo que le dice al modelo PARA QUE LADO va la relacion: hasta
+    `medicina@2` el prompt de medicina publicaba trece ids separados por coma, sin una palabra de
+    semantica, y el juez midio ese prompt con `j3_relacion` 2,08 sobre 5.
+    """
+    linea = (f"- {r.id}: {' | '.join(sorted(r.desde)) or 'cualquiera'} -> "
+             f"{' | '.join(sorted(r.hasta)) or 'cualquiera'}")
+    return f"{linea}\n    ej: {r.ejemplo}" if r.ejemplo else linea
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════
@@ -353,6 +485,66 @@ def normalizar_nombre(nombre: str, tx: Taxonomia | None = None) -> str:
     return nombre
 
 
+def _plegar(texto: str) -> str:
+    """Minuscula, SIN ACENTOS, sin puntuacion, espacios colapsados. ES PARA COMPARAR.
+
+    No confundir con `normalizar_nombre`, que ESCRIBE el nombre canonico del grafo y por eso
+    respeta `canonicalization.fold_accents` (false en los tres perfiles: encenderlo es una
+    migracion). Acá plegar acentos es gratis y necesario: "insuficiencia cardíaca" tiene que
+    encontrarse en un pasaje que escriba "insuficiencia cardiaca", y ninguno de los dos nombres
+    se guarda en ninguna parte.
+    """
+    texto = _NO_PALABRA.sub(" ", (texto or "").strip().lower())
+    texto = "".join(c for c in unicodedata.normalize("NFD", texto)
+                    if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", texto).strip()
+
+
+def _mismo_token(a: str, b: str) -> bool:
+    """Dos palabras que son LA MISMA CON OTRO SUFIJO (ver `MIN_TOKEN_SUFIJO`/`MAX_DIF_SUFIJO`)."""
+    if a == b:
+        return True
+    corto, largo = (a, b) if len(a) <= len(b) else (b, a)
+    if len(corto) < MIN_TOKEN_SUFIJO or len(largo) - len(corto) > MAX_DIF_SUFIJO:
+        return False
+    return corto[:-1] == largo[:len(corto) - 1]
+
+
+def _aparece(nombre: str, fragmento: str, tokens: list) -> bool:
+    """Si `nombre` (ya plegado) esta nombrado en el fragmento: literal, o como secuencia
+    CONTIGUA de palabras que son las mismas con otro sufijo.
+
+    La contiguidad es lo que hace que la regla no se afloje: sin ella, "insuficiencia renal"
+    matchearia un pasaje que dice "insuficiencia cardiaca" y "funcion renal" en renglones
+    distintos, que es justo la entidad inferida que se quiere descartar.
+    """
+    if not nombre:
+        return False
+    if nombre in fragmento:
+        return True
+    partes = nombre.split()
+    if not partes or len(partes) > len(tokens):
+        return False
+    for i in range(len(tokens) - len(partes) + 1):
+        if all(_mismo_token(a, b)
+               for a, b in zip(partes, tokens[i:i + len(partes)], strict=True)):
+            return True
+    return False
+
+
+def con_evidencia(nombre: str, sinonimos, fragmento: str, tokens: list) -> bool:
+    """La entidad esta nombrada en el fragmento por su nombre o por uno de sus sinonimos.
+
+    LOS SINONIMOS SON LA MITAD DE LA REGLA, y no un adorno: el perfil ordena traducir al español
+    ("heart failure" -> "insuficiencia cardíaca") y pedir los sinonimos del texto, asi que en un
+    fragmento en ingles la superficie que aparece es el SINONIMO y no el nombre canonico. Sin
+    esta mitad la regla descartaria 19,2% de las entidades del corpus en vez de 7,6%.
+    """
+    if _aparece(nombre, fragmento, tokens):
+        return True
+    return any(_aparece(_plegar(s), fragmento, tokens) for s in sinonimos or ())
+
+
 def _descartar(descartes, libro_id, chunk_id, motivo: str, **campos) -> None:
     fila = {"motivo": motivo, "chunk_id": chunk_id, **campos}
     if descartes is not None:
@@ -361,11 +553,12 @@ def _descartar(descartes, libro_id, chunk_id, motivo: str, **campos) -> None:
 
 
 def validar(tx: Taxonomia, crudo: dict, chunk: dict, *,
-            rechazo_from_to: bool = RECHAZO_FROM_TO, descartes: list | None = None) -> dict:
+            rechazo_from_to: bool = RECHAZO_FROM_TO,
+            rechazo_orientacion: bool = RECHAZO_ORIENTACION,
+            descartes: list | None = None) -> dict:
     """Lo que devolvio el modelo, filtrado contra `tx`. Los descartes se CUENTAN.
 
-    Cuatro diferencias con el `_validate_extraction` que reemplaza, y solo la ultima cambia lo
-    que sale:
+    Cuatro diferencias con el `_validate_extraction` que reemplazo el 14-sep-2026:
 
       · los tipos y las relaciones se chequean contra el perfil, no contra dos sets de modulo;
       · `min_nombre`/`max_nombre` salen de `canonicalization` (eran 2 y 100 literales);
@@ -374,6 +567,22 @@ def validar(tx: Taxonomia, crudo: dict, chunk: dict, *,
         resultado. Antes se perdian en silencio y nadie podia medir la diferencia entre lo que
         el modelo devolvio y lo que quedo.
 
+    Y TRES REGLAS NUEVAS DE v3 (18-sep-2026), las tres nacidas de la cola de peores del juez:
+
+      · `orientacion` — el par viola los `from`/`to` en este sentido y los cumple dado vuelta:
+        la relacion esta invertida y se RECHAZA (`RECHAZO_ORIENTACION`, encendido);
+      · `nombre_de_tipo` — el nombre de una entidad, o un extremo de relacion, es exactamente el
+        nombre de una CLASE del vocabulario ('tionamidas PERTENECE_A grupo_farmacologico');
+      · `sin_evidencia` — la entidad no esta nombrada en el fragmento. Se descarta y el conteo
+        viaja en `inferidas_descartadas`.
+
+    LA EVIDENCIA SOLO SE EXIGE SI HAY FRAGMENTO, y hay que decirlo porque es un agujero con
+    forma: `validar(tx, crudo, {"id": …, "libro_id": …})` sin `text` NO chequea evidencia,
+    porque sin el texto no se puede decidir y descartar todo seria peor. El unico llamador de
+    produccion (`extract_entities_fast.extract_batch`) pasa el chunk entero —el mismo dict que
+    fue al prompt—, y un test lo fija. Un llamador nuevo que pase un chunk pelado se saltea la
+    regla en silencio.
+
     LO QUE NO CAMBIA, y es una decision documentada: una relacion con UN SOLO extremo extraido
     en ESTE fragmento SOBREVIVE, como hasta hoy. El diseño proponia descartarla (§3.3, T3)
     dando por hecho que muere despues en la carga; no es cierto: `canonicalizar` funde las
@@ -381,15 +590,21 @@ def validar(tx: Taxonomia, crudo: dict, chunk: dict, *,
     otro fragmento y la relacion entra al grafo. Descartarla aca perderia aristas reales. Se
     cuenta (`motivo="extremo_ausente"`) y se deja pasar.
 
-    LOS DESCARTES NO VIAJAN EN EL RESULTADO, y tambien es a proposito: este dict se serializa
-    tal cual en `extracted/{libro}_entities.json`, y `extraction/v1` declara sus items con
-    `additionalProperties: false`. Quien los quiera pasa una lista en `descartes=`; el rastro
-    permanente es el evento.
+    LOS DESCARTES NO VIAJAN EN EL RESULTADO —solo su CONTEO de inferidas—, y tambien es a
+    proposito: este dict se serializa tal cual en `extracted/{libro}_entities.json`, y
+    `extraction/v1` declara sus items con `additionalProperties: false`. `inferidas_descartadas`
+    es una propiedad declarada del contrato desde el 18-sep-2026 y aparece SOLO cuando hay algo
+    que contar, para que el artefacto de un chunk limpio no cambie de forma. El detalle de cada
+    descarte se pide con `descartes=`; el rastro permanente es el evento.
     """
     libro_id = chunk.get("libro_id", "")
     chunk_id = chunk.get("id", "")
+    #: El fragmento COMO LO VIO EL MODELO: el mismo recorte que hace `armar_fragmento`. Buscar la
+    #: entidad en el chunk entero castigaria al modelo por lo que no se le mando.
+    fragmento = _plegar((chunk.get("text") or "")[:tx.max_chars_fragmento])
+    tokens = fragmento.split()
 
-    entidades, nombres = [], set()
+    entidades, nombres, inferidas = [], set(), 0
     for cruda in crudo.get("entidades") or []:
         nombre = normalizar_nombre(cruda.get("nombre", ""), tx)
         tipo = (cruda.get("tipo") or "").lower().strip()
@@ -402,11 +617,18 @@ def validar(tx: Taxonomia, crudo: dict, chunk: dict, *,
         if tipo not in tx.tipos:
             _descartar(descartes, libro_id, chunk_id, "tipo_entidad", tipo=tipo)
             continue
+        if _plegar(nombre) in tx.nombres_de_tipo:
+            _descartar(descartes, libro_id, chunk_id, "nombre_de_tipo", tipo=tipo)
+            continue
         sinonimos = []
         for s in cruda.get("sinonimos") or []:
             sn = normalizar_nombre(s, tx)
             if sn and sn != nombre and len(sn) >= tx.min_nombre:
                 sinonimos.append(sn)
+        if fragmento and not con_evidencia(_plegar(nombre), sinonimos, fragmento, tokens):
+            inferidas += 1
+            _descartar(descartes, libro_id, chunk_id, "sin_evidencia", tipo=tipo)
+            continue
         entidades.append({"nombre": nombre, "tipo": tipo, "sinonimos": sinonimos})
         nombres.add(nombre)
 
@@ -421,23 +643,36 @@ def validar(tx: Taxonomia, crudo: dict, chunk: dict, *,
         if rid not in tx.relaciones:
             _descartar(descartes, libro_id, chunk_id, "tipo_relacion", relacion=rid)
             continue
+        de_tipo = [x for x in (desde, hasta) if _plegar(x) in tx.nombres_de_tipo]
+        if de_tipo:
+            _descartar(descartes, libro_id, chunk_id, "nombre_de_tipo", relacion=rid,
+                       desde_tipo=tipo_de.get(desde), hasta_tipo=tipo_de.get(hasta))
+            continue
         if desde not in nombres and hasta not in nombres:
             _descartar(descartes, libro_id, chunk_id, "extremo_ausente", relacion=rid,
                        desde_tipo=None, hasta_tipo=None)
             continue
         regla = tx.relaciones[rid]
         desde_tipo, hasta_tipo = tipo_de.get(desde), tipo_de.get(hasta)
-        viola = ((desde_tipo is not None and regla.desde and desde_tipo not in regla.desde) or
-                 (hasta_tipo is not None and regla.hasta and hasta_tipo not in regla.hasta))
-        if viola:
+        if regla.orientacion_imposible(desde_tipo, hasta_tipo):
+            _descartar(descartes, libro_id, chunk_id, "orientacion", relacion=rid,
+                       desde_tipo=desde_tipo, hasta_tipo=hasta_tipo)
+            if rechazo_orientacion:
+                continue
+        elif ((desde_tipo is not None and regla.desde and desde_tipo not in regla.desde) or
+              (hasta_tipo is not None and regla.hasta and hasta_tipo not in regla.hasta)):
+            # Ilegal en los DOS sentidos: puede ser dato malo o regla mala, y por eso no rechaza.
             _descartar(descartes, libro_id, chunk_id, "from_to", relacion=rid,
                        desde_tipo=desde_tipo, hasta_tipo=hasta_tipo)
             if rechazo_from_to:
                 continue
         relaciones.append({"desde": desde, "relacion": rid, "hasta": hasta})
 
-    return {"entidades": entidades, "relaciones": relaciones,
-            "chunk_id": chunk_id, "libro_id": libro_id}
+    salida = {"entidades": entidades, "relaciones": relaciones,
+              "chunk_id": chunk_id, "libro_id": libro_id}
+    if inferidas:
+        salida["inferidas_descartadas"] = inferidas
+    return salida
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════
@@ -459,14 +694,27 @@ def canonicalizar(tx: Taxonomia, extracciones: list) -> tuple:
     corridas identicas producian grafos distintos. Ahora es una lista en orden de aparicion
     —o sea en orden del documento, porque las extracciones llegan en orden de chunk— y el
     corte toma los PRIMEROS. Sin esto ningun golden sobre entidades es posible.
+
+    `min_name_length`/`max_name_length` TAMBIEN SE APLICAN ACA (18-sep-2026), y no es redundante
+    con `validar`: el camino `--upload` (`extract_entities.py`) canonicaliza un
+    `extracted/*.json` LEIDO DE DISCO, sin volver a validarlo, y los artefactos viejos se
+    escribieron con otros limites. Sin esto, re-subir un artefacto de julio puede crear nodos con
+    un nombre de un caracter que el validador de hoy no dejaria entrar. Un nombre fuera de rango
+    no deja rastro en `descartes` porque este paso no recibe chunk ni libro: el rastro es del
+    validador, que es donde el descarte se puede atribuir.
     """
     entidades: dict = {}
     sinonimo_de: dict = {}
+
+    def _admisible(nombre: str) -> bool:
+        return bool(nombre) and tx.min_nombre <= len(nombre) <= tx.max_nombre
 
     for ext in extracciones:
         chunk_id = ext.get("chunk_id", "")
         for ent in ext.get("entidades") or []:
             nombre = ent["nombre"]
+            if not _admisible(nombre):
+                continue
             canonico = sinonimo_de.get(nombre, nombre) if tx.fundir_sinonimos else nombre
             existente = entidades.get(canonico)
             if existente is not None:

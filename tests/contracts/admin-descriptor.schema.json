@@ -18,7 +18,7 @@
     "profile": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_-]*@[0-9]+$",
-      "description": "Perfil de dominio y version con que se extrae, tal como viaja en el linaje (lineage.profile): medicina@2, derecho@1."
+      "description": "Perfil de dominio y version con que se extrae, tal como viaja en el linaje (lineage.profile): medicina@3, derecho@1."
     },
     "instance": {
       "type": "object",

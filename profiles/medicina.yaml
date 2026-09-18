@@ -1,120 +1,216 @@
 # Perfil de dominio: bibliografía médica (MedGraph)
 # Fuente: taxonomía en producción de extract_entities.py (2026-07, 159K+ entidades)
 #
-# VERSION 2 (14-sep-2026, decisión E: la taxonomía de extracción sale del perfil). Hasta v1 este
-# archivo era DOCUMENTACION: la taxonomía que de verdad regía estaba escrita a mano en
-# `extract_entities.py` y `extract_entities_fast.py`, y ninguna línea de código leía `entities`,
-# `relations`, `extraction.*` ni `canonicalization.*`. Desde v2 el prompt se RENDERIZA desde acá
-# (`prompts/medicina.md` + `extraction.rules`), el validador usa estos tipos y el canonicalizador
-# lee `canonicalization.*`.
+# VERSION 3 (18-sep-2026, `medgraph/docs/DISENO-curar-extractor-18sep.md`). El juez-LLM midió la
+# extracción contra seis controles positivos firmados (`docs/E-juez-linea-de-base-14sep.md`,
+# gemini-2.5-pro): reales 3,63/5 y **`j3_relacion` 2,08**. El eje débil no era la entidad: era la
+# RELACIÓN. Los cuatro defectos que el juez nombró, y lo que v3 hace con cada uno:
 #
-# QUE NO CAMBIA, Y ES EL PUNTO: v2 renderiza EL MISMO PROMPT que el código en v1, byte a byte. Las
-# `extraction.rules` de abajo se VOLCARON del bloque REGLAS de `extract_entities_fast.BATCH_PROMPT`
-# (corte y pegado programático, no retipeadas: un acento retipeado no sobrevive), y un test lo fija
-# contra un golden congelado antes del cambio
-# (`medgraph/tests/golden/extraccion/prompt_medicina_v1.txt`). O sea que el corpus de 159K entidades
-# extraído con v1 SIGUE SIENDO COMPARABLE con lo que se extraiga con v2. El bump de versión no dice
-# "cambió el criterio": dice "ahora el criterio está acá y no en el código".
+#   1. relaciones INVERTIDAS ('agente CAUSADA_POR patologia', 'farmaco SE_TRATA_CON patologia').
+#      → cada relación declara `ejemplo:` con su dirección, y el prompt ahora renderiza
+#        `{relations_desc}` (los `from`/`to` MÁS el ejemplo) en vez de la lista pelada de ids.
+#        Medido sobre el corpus ya extraído: 8,27% de las 227.388 relaciones de los tres tratados
+#        largos violan los `from`/`to` EN ESTE SENTIDO y los cumplirían DADAS VUELTA; el validador
+#        las rechaza desde hoy (`pipeline/extraccion.py::RECHAZO_ORIENTACION`). El otro 17,10% es
+#        ilegal en los DOS sentidos y NO se rechaza: ahí la regla es sospechosa antes que el dato
+#        (es la lección de los 71.569, ver abajo).
+#   2. `PERTENECE_A` con un TIPO como destino ('tionamidas PERTENECE_A grupo_farmacologico').
+#      → cada tipo declara `sinonimos:`, las superficies con que la PROSA nombra a la clase. Un
+#        extremo de relación —o una entidad— cuyo nombre sea exactamente un id de tipo, su label
+#        o uno de esos sinónimos se descarta: la clase no es una entidad. Medido: 1.697 destinos
+#        (0,75%), de los cuales 1.542 en `PERTENECE_A` y 1.452 literalmente 'grupo farmacologico'.
+#   3. entidades INFERIDAS (el modelo pone lo que sabe del tema, no lo que el pasaje dice).
+#      → regla de evidencia textual en el validador, y la regla correspondiente en `rules`.
+#   4. un TIPO QUE FALTABA: enzimas, proteínas, hormonas y receptores caían como `farmaco`,
+#      `procedimiento` o `parametro` porque el vocabulario no tenía dónde ponerlas.
+#      → `molecula_biologica`. Es la única decisión de VOCABULARIO de v3.
+#
+# QUE NO CAMBIA: los once tipos de v1/v2 con sus labels y sus `desc`, la `name_property`, los
+# `parse`/`chunk` (el corpus no se re-chunkea) y las cinco reglas verbatim de v1, que siguen
+# siendo las cinco primeras de `extraction.rules`.
+#
+# QUE SI CAMBIA, Y HAY QUE DECIRLO: **el prompt renderizado de v3 NO es el de v1/v2**. El candado
+# `tests/golden/extraccion/prompt_medicina_v1.txt` sigue en el repo como TESTIGO de con qué prompt
+# se extrajeron los 90.806 chunks del corpus, y un test exige que el de v3 difiera de él sólo en
+# lo que este comentario declara. El corpus ya cargado es `medicina@2`: comparable con sí mismo,
+# no con lo que se extraiga desde hoy.
+#
+# LO QUE ESTA TANDA NO HACE: re-extraer el corpus (90.980 chunks, pago y largo) y tocar el
+# retrieval. El label `MoleculaBiologica` todavía NO lo consulta nadie: `medgraph/schema.py` no le
+# declara constraint y `api/routers/comprehensive.py`, `api/services/analyzer.py` y
+# `medgraph/dedup_entities.py` nombran sus labels a mano. Mientras no se re-extraiga no hay un
+# solo nodo con ese label, así que no hay nada perdido; ENGANCHARLO ES PRE-REQUISITO de la
+# decisión de re-extraer.
 profile: medicina
-version: 2
+version: 3
 language: es
 
 graph:
   target: medgraph            # nombre lógico del grafo; la resolución es de la infraestructura
   name_property: nombre       # legado — dominios nuevos usan `name`
 
+# `sinonimos` (18-sep-2026) NO son sinónimos de una entidad: son las superficies con que la prosa
+# médica nombra a LA CLASE. El validador las usa para un solo fin y es el defecto 2 del juez: un
+# nombre que es la clase no es una entidad, ni como entidad ni como extremo de una relación. El id
+# y el `label` se agregan solos, con y sin guiones bajos, y la comparación pliega acentos (es una
+# comparación, no un nombre canónico: `fold_accents` sigue en false para lo que se escribe).
 entities:
   - id: patologia
     label: Patologia
     desc: "enfermedades y condiciones: otitis media, neumonía, diabetes, HTA, psoriasis"
+    sinonimos: [enfermedad, enfermedades, cuadro clínico, condición clínica]
   - id: estructura_anatomica
     label: EstructuraAnatomica
     desc: "estructuras: oído medio, membrana timpánica, retina, riñón, hígado"
+    sinonimos: [estructura anatómica, estructuras anatómicas, órgano, órganos]
   - id: procedimiento
     label: Procedimiento
     desc: "técnicas y procedimientos: otoscopía, ECG, intubación, toma de TA"
+    sinonimos: [procedimientos, técnica, técnicas, intervención]
   - id: farmaco
     label: Farmaco
     desc: "fármacos específicos: furosemida, amoxicilina, ibuprofeno, metformina"
+    sinonimos: [fármaco, fármacos, medicamento, medicamentos, droga, drogas]
   - id: grupo_farmacologico
     label: GrupoFarmacologico
     desc: "clases de fármacos: diuréticos, betalactámicos, AINEs, corticoides"
+    sinonimos: [grupo farmacológico, grupos farmacológicos, clase farmacológica,
+                familia de fármacos]
   - id: agente
     label: Agente
     desc: "agentes infecciosos: S. pneumoniae, virus sincicial respiratorio, E. coli"
+    sinonimos: [agente infeccioso, agentes infecciosos, microorganismo, microorganismos,
+                patógeno, patógenos, germen]
   - id: signo
     label: Signo
     desc: "signos clínicos objetivos: fiebre, edema, soplo, cianosis, abombamiento timpánico"
+    sinonimos: [signos, signo clínico, signos clínicos]
   - id: sintoma
     label: Sintoma
     desc: "síntomas subjetivos: otalgia, cefalea, disnea, dolor torácico"
+    sinonimos: [síntoma, síntomas]
   - id: metodo_dx
     label: MetodoDx
     desc: "métodos diagnósticos: hemograma, ecografía, audiometría, PCR"
+    sinonimos: [método diagnóstico, métodos diagnósticos, estudio complementario,
+                prueba diagnóstica]
   - id: hallazgo
     label: Hallazgo
     desc: "hallazgos en estudios o examen: derrame, consolidación, hipertrofia"
+    sinonimos: [hallazgos, hallazgo clínico, hallazgos clínicos]
   - id: parametro
     label: Parametro
     desc: "parámetros medibles: kalemia, TA sistólica, FC, saturación de O2"
+    sinonimos: [parámetro, parámetros, valor de laboratorio]
+  # EL TIPO NUEVO DE v3 (defecto 4 del juez, 18-sep-2026). Sin él, "aldehído deshidrogenasa" caía
+  # como `procedimiento`, "troponina" como `parametro` y "hormona liberadora de gonadotropina"
+  # como `farmaco` —las tres objeciones están en `docs/E-juez-linea-de-base-14sep.md`—, y el
+  # parche vivía aguas abajo, en el mapa de "tipos genéricos que Gemini inventa" de
+  # `api/services/analyzer.py`.
+  #
+  # LA FRONTERA CON `farmaco`, que es la única que se puede confundir: una molécula que el cuerpo
+  # produce, o que el texto trata como diana, es `molecula_biologica`; la MISMA molécula usada como
+  # medicamento con dosis es `farmaco` (la insulina del páncreas vs la insulina que se inyecta).
+  # Y con `parametro`: la molécula es la sustancia y su CONCENTRACIÓN medida es `parametro`
+  # ("troponina" vs "troponina sérica de 0,4 ng/mL").
+  - id: molecula_biologica
+    label: MoleculaBiologica
+    desc: "moléculas del organismo: enzimas, proteínas, hormonas, receptores, citocinas y factores
+      de la coagulación (aldehído deshidrogenasa, troponina, insulina, receptor de estrógeno)"
+    sinonimos: [molécula, moléculas, molécula biológica, moléculas biológicas, enzima, enzimas,
+                proteína, proteínas, hormona, hormonas, receptor, receptores, citocina, citocinas]
 
 # Reglas VALIDADAS empiricamente contra el grafo real (2026-07-30, 138 libros).
 # La primera version era demasiado estrecha: marcaba 71.569 relaciones como invalidas,
 # de las cuales la mayoria eran reglas mal escritas, no datos malos. Los `to` que se
 # agregaron abajo con nota "validado" salieron de mirar que produce el extractor.
+#
+# `ejemplo` (18-sep-2026) FIJA LA DIRECCION, y es el defecto 1 del juez. Hasta v2 el prompt de
+# medicina renderizaba `{relations}` —los trece ids separados por coma, sin una palabra de
+# semantica ni de sentido—: el modelo nunca vio que `SE_TRATA_CON` va de la enfermedad al
+# tratamiento. Desde v3 el prompt renderiza `{relations_desc}`, que lleva los `from`/`to` y este
+# ejemplo. Los ejemplos son genericos y no citan ninguna fuente.
 relations:
   - id: CAUSADA_POR
     from: [patologia, signo, sintoma, hallazgo]
     # parametro validado: "trastornos tromboticos CAUSADA_POR factor v de leiden" (567 casos)
     # hallazgo validado: "paro cardiaco CAUSADA_POR muerte encefalica" (540)
-    to: [agente, patologia, farmaco, parametro, hallazgo, estructura_anatomica]
+    to: [agente, patologia, farmaco, parametro, hallazgo, estructura_anatomica,
+         molecula_biologica]
+    ejemplo: 'la otitis media aguda CAUSADA_POR streptococcus pneumoniae — la CAUSA va en
+      "hasta"; "el agente CAUSADA_POR la enfermedad" esta al reves'
   - id: SE_MANIFIESTA_CON
     from: [patologia, signo, hallazgo]
     # parametro validado: "disfuncion primaria SE_MANIFIESTA_CON enzimas hepaticas" (2212)
     # patologia validado: "lesion neurologica SE_MANIFIESTA_CON coma irreversible" (11399)
-    to: [signo, sintoma, hallazgo, parametro, patologia, estructura_anatomica]
+    to: [signo, sintoma, hallazgo, parametro, patologia, estructura_anatomica,
+         molecula_biologica]
+    ejemplo: 'la insuficiencia cardiaca SE_MANIFIESTA_CON disnea — la manifestacion va en "hasta"'
   - id: SE_DIAGNOSTICA_CON
     # hallazgo validado como origen: "muerte encefalica SE_DIAGNOSTICA_CON protocolo" (383)
     from: [patologia, hallazgo]
     # parametro validado: "daño miocardico SE_DIAGNOSTICA_CON troponina" (1406)
-    to: [metodo_dx, procedimiento, parametro, hallazgo]
+    to: [metodo_dx, procedimiento, parametro, hallazgo, molecula_biologica]
+    ejemplo: 'el daño miocardico SE_DIAGNOSTICA_CON troponina — el metodo o el marcador va en
+      "hasta"; es la relacion con la que se dice que una molecula es marcador de algo'
   - id: SE_TRATA_CON
     from: [patologia]
     to: [farmaco, grupo_farmacologico, procedimiento]
+    ejemplo: 'la otitis media aguda SE_TRATA_CON amoxicilina — el TRATAMIENTO va en "hasta"; un
+      farmaco no "se trata con" una enfermedad ni con la molecula que inhibe (eso es ASOCIADA_A)'
   - id: PARTE_DE
     from: [estructura_anatomica]
     to: [estructura_anatomica]
+    ejemplo: 'la membrana timpanica PARTE_DE el oido medio — el TODO va en "hasta"'
   - id: EVALUA
     from: [metodo_dx, procedimiento]
-    to: [estructura_anatomica, patologia, parametro]
+    to: [estructura_anatomica, patologia, parametro, molecula_biologica]
+    ejemplo: 'la audiometria EVALUA la audicion — el estudio va en "desde" y lo evaluado en
+      "hasta"'
   - id: PERTENECE_A
     # Admite jerarquias DENTRO del mismo label — no solo farmaco->grupo.
     # Validado: grupo->grupo (598, "catecolaminas PERTENECE_A farmacos vasopresores"),
     # patologia->patologia (621, "fractura de craneo PERTENECE_A traumatismo encefalico").
     # OJO: farmaco->farmaco (1749) NO es jerarquia, son SINONIMOS sin deduplicar
     # (ej "99mtchmpao / hexametilpropilenaminoxima") -> arreglar en dedup, no aca.
-    from: [farmaco, grupo_farmacologico, patologia, estructura_anatomica, agente]
-    to: [grupo_farmacologico, patologia, estructura_anatomica, agente, procedimiento]
+    from: [farmaco, grupo_farmacologico, patologia, estructura_anatomica, agente,
+           molecula_biologica]
+    to: [grupo_farmacologico, patologia, estructura_anatomica, agente, procedimiento,
+         molecula_biologica]
+    ejemplo: 'la amoxicilina PERTENECE_A los betalactamicos — el destino es el grupo CON NOMBRE,
+      nunca el nombre de un tipo del vocabulario'
   - id: PUEDE_PRODUCIR
-    from: [farmaco, grupo_farmacologico, procedimiento, agente]
+    from: [farmaco, grupo_farmacologico, procedimiento, agente, molecula_biologica]
     to: [patologia, signo, sintoma, hallazgo]
+    ejemplo: 'los AINE PUEDE_PRODUCIR hemorragia digestiva — quien produce va en "desde" y el
+      efecto en "hasta"'
   - id: DIFERENCIAL_DE
     from: [patologia]
     to: [patologia]
+    ejemplo: 'la neumonia DIFERENCIAL_DE la insuficiencia cardiaca — las dos son patologias'
   - id: ASOCIADA_A            # laxa a propósito: asociación inespecífica
-    from: [patologia, signo, sintoma, hallazgo, parametro, farmaco, procedimiento]
-    to: [patologia, signo, sintoma, hallazgo, parametro, farmaco, procedimiento]
+    from: [patologia, signo, sintoma, hallazgo, parametro, farmaco, procedimiento,
+           molecula_biologica]
+    to: [patologia, signo, sintoma, hallazgo, parametro, farmaco, procedimiento,
+         molecula_biologica]
+    ejemplo: 'la obesidad ASOCIADA_A la apnea del sueño — asociacion inespecifica, sin direccion
+      causal; es la relacion para "el farmaco actua sobre la enzima"'
   - id: FACTOR_DE_RIESGO
-    from: [patologia, hallazgo, parametro, farmaco, agente]
+    from: [patologia, hallazgo, parametro, farmaco, agente, molecula_biologica]
     to: [patologia]
+    ejemplo: 'la hipertension FACTOR_DE_RIESGO el accidente cerebrovascular — el riesgo va en
+      "desde" y la patologia en "hasta"'
   - id: COMPLICACION_DE
     # signo validado como origen: "palidez COMPLICACION_DE menometrorragia" (259)
     from: [patologia, hallazgo, signo]
     # farmaco validado: "hemorragia gastrointestinal COMPLICACION_DE salicilatos" (253)
     to: [patologia, procedimiento, farmaco, hallazgo, signo]
+    ejemplo: 'la hemorragia digestiva COMPLICACION_DE los salicilatos — la COMPLICACION va en
+      "desde" y aquello de lo que es complicacion en "hasta"'
   - id: VARIANTE_DE
     from: [patologia]
     to: [patologia]
+    ejemplo: 'la diabetes tipo 2 VARIANTE_DE la diabetes mellitus — la forma general va en "hasta"'
 
   # LAS CUATRO HUERFANAS (14-sep-2026, decisión 2 de §8 del diseño de extracción por perfil).
   # `extract_entities.RELATION_TYPES` las acepta desde la etapa de anatomía, el prompt nunca las
@@ -125,7 +221,7 @@ relations:
   # `extraer: false` = la relación es VALIDA para el grafo y se publica en el descriptor, pero NO
   # entra al prompt renderizado. Por eso agregarlas acá no cambia una coma de lo que el modelo
   # produce. La alternativa —borrarlas del set aceptado— deja el grafo con aristas que el contrato
-  # niega, que es peor.
+  # niega, que es peor. Sin `ejemplo`: lo que no se pide no se ejemplifica.
   - id: IRRIGA
     from: [estructura_anatomica]
     to: [estructura_anatomica]
@@ -142,6 +238,14 @@ relations:
     from: [estructura_anatomica]
     to: [estructura_anatomica]
     extraer: false
+
+# NINGUNA RELACION NUEVA EN v3, Y ES UNA DECISION (18-sep-2026). El diseño proponía `ES_MARCADOR_DE`
+# y `REGULA` para la molécula. No se agregan: el retrieval nombra los tipos de relación A MANO en
+# su Cypher (`api/routers/comprehensive.py`, `api/services/graph.py`, `api/services/layers.py`),
+# así que un tipo nuevo produce aristas que ninguna consulta recorre —exactamente el agujero que
+# las cuatro huérfanas documentan—. `ES_MARCADOR_DE` ya existe como `SE_DIAGNOSTICA_CON` (su
+# ejemplo validado es "daño miocardico SE_DIAGNOSTICA_CON troponina") y `REGULA` como `ASOCIADA_A`,
+# que es laxa a propósito. Si algún día hacen falta de verdad, esa tanda empieza por el retrieval.
 
 # Como se PARSEA y se CHUNKEA este material (9-sep-2026, ver pipeline/estrategia.py). Vivia en
 # el codigo del parser, o sea que "Farreras numera sus capitulos asi" era un commit y no un dato
@@ -185,7 +289,7 @@ parse:
 
 # Prosa medica: el parrafo es la unidad de sentido, chunks chicos con solape generoso. Estos son
 # los numeros con que se ingirio TODO el corpus actual (90.806 chunks, 163 libros): cambiarlos
-# obliga a re-chunkear el corpus y a bumpear `version`.
+# obliga a re-chunkear el corpus y a bumpear `version`. v3 NO los toca: el corpus no se re-chunkea.
 chunk:
   target_size: 280
   min_size: 150
@@ -203,13 +307,20 @@ extraction:
   # metadata y las dos en producción: el prefijo de EMBEDDING lleva tildes ("Capítulo: …") y el
   # contexto de EXTRACCION no ("Capitulo: …"). Ninguna está equivocada; este perfil conserva las
   # dos para que la próxima persona no "arregle" una de ellas.
+  #
+  # Y ES TAMBIEN EL ALCANCE DE LA REGLA DE EVIDENCIA (18-sep-2026): el validador busca la entidad
+  # en estos 2.500 caracteres y no en el chunk entero, porque es exactamente lo que el modelo vio.
   max_chars_fragmento: 2500
   prompt_template: prompts/medicina.md
-  # VERBATIM del bloque REGLAS de `extract_entities_fast.BATCH_PROMPT` (v1), volcado con un
-  # script. El valor de v1 era una PARAFRASIS escrita al crear el perfil que ningún modelo vio
-  # nunca: renderizarla habría cambiado el prompt en la primera corrida. El `|-` (y no `|`) es
-  # parte del trato: la plantilla pone `{rules}` seguido de un renglón en blanco, así que un
-  # salto de línea de más acá cambia el prompt.
+  # LAS CINCO PRIMERAS SON VERBATIM del bloque REGLAS de `extract_entities_fast.BATCH_PROMPT`
+  # (v1), volcadas con un script. El valor de v1 del perfil era una PARAFRASIS escrita al crear
+  # el perfil que ningún modelo vio nunca. El `|-` (y no `|`) es parte del trato: la plantilla
+  # pone `{rules}` seguido de un renglón en blanco, así que un salto de línea de más acá cambia
+  # el prompt.
+  #
+  # LAS TRES ULTIMAS SON DE v3 (18-sep-2026) y son la mitad-prompt de lo que el validador empezó
+  # a rechazar el mismo día: evidencia textual, dirección de la relación y el destino que es una
+  # clase. Van acá y no en la plantilla porque son criterio del DOMINIO; la plantilla es la forma.
   rules: |-
     - Extrae SOLO entidades medicas concretas (no conceptos vagos)
     - SIEMPRE usa nombres canonicos en ESPAÑOL, sin importar el idioma del texto.
@@ -218,6 +329,15 @@ extraction:
     - Incluye sinonimos y abreviaturas comunes (en español e inglés)
     - Las relaciones deben conectar entidades que aparecen en el texto
     - NO inventes relaciones que no esten en el texto
+    - Cada entidad tiene que estar NOMBRADA en el fragmento. Si traducis del ingles, poné la
+      superficie del texto en "sinonimos". Lo que el fragmento no menciona no se extrae, aunque
+      sepas que corresponde al tema: se descarta y se cuenta.
+    - La DIRECCION de cada relacion es la de su definicion: el primer grupo de tipos es lo que
+      puede ir en "desde" y el segundo lo que puede ir en "hasta". Una relacion dada vuelta se
+      descarta, asi que si dudas mira el ejemplo.
+    - El destino de una relacion es siempre una entidad CON NOMBRE, nunca el nombre de un tipo
+      del vocabulario ni su plural. "PERTENECE_A los betalactamicos" sirve; "PERTENECE_A
+      grupo_farmacologico" o "PERTENECE_A enzimas" no.
 
 # Los cuatro valores nuevos (14-sep-2026) DECLARAN LA CONDUCTA DE HOY, no la cambian:
 #   · max_name_length 100  — era un literal `len(nombre) > 100` en `_validate_extraction`.

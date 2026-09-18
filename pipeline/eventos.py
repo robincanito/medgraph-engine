@@ -41,11 +41,24 @@ un campo sin actualizar los oraculos que lo leen.
 
   extraccion_descarte   libro_id, chunk_id, motivo, tipo?, relacion?, desde_tipo?, hasta_tipo?
                 motivo in {tipo_entidad, tipo_relacion, nombre_corto, nombre_largo, from_to,
-                extremo_ausente}. UNO POR ITEM DESCARTADO (14-sep-2026, decision E). Hasta hoy
-                lo que el validador tiraba se perdia en silencio y nadie podia medir la
-                diferencia entre lo que el modelo devolvio y lo que quedo en el grafo.
+                extremo_ausente, orientacion, nombre_de_tipo, sin_evidencia}. UNO POR ITEM
+                DESCARTADO (14-sep-2026, decision E). Hasta entonces lo que el validador tiraba
+                se perdia en silencio y nadie podia medir la diferencia entre lo que el modelo
+                devolvio y lo que quedo en el grafo.
                 `from_to` y `extremo_ausente` se emiten SIN rechazar: son la evidencia con la
                 que se decide si el rechazo estricto se enciende (ver extraccion.py).
+                LOS TRES ULTIMOS SON DE v3 (18-sep-2026, "curar el extractor contra la linea de
+                base del juez") y los tres SI rechazan:
+                  orientacion     — el par de tipos viola los from/to en este sentido y los
+                                    cumpliria DADO VUELTA: la relacion esta invertida. Es lo
+                                    distinto de `from_to`, que es ilegal en los dos sentidos y
+                                    por eso puede ser una regla mala en vez de un dato malo.
+                  nombre_de_tipo  — el nombre (de una entidad, o de un extremo de relacion) es
+                                    exactamente una CLASE del vocabulario: 'tionamidas
+                                    PERTENECE_A grupo_farmacologico'. Una clase no es una entidad.
+                  sin_evidencia   — la entidad no esta nombrada en el fragmento que vio el
+                                    modelo. Su conteo por chunk viaja tambien en el artefacto
+                                    (`inferidas_descartadas`, extraction/v1).
 
 Las claves del sobre JSON (severity, message, logger, time, evento, exception) estan PROHIBIDAS
 como nombre de campo: el formateador aplana los campos al nivel raiz y una colision pisaria el

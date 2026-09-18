@@ -3,11 +3,15 @@ Eres un extractor de entidades medicas. Analiza los siguientes {n} fragmentos de
 REGLAS:
 {rules}
 
-TIPOS DE ENTIDAD:
-{entities}
+TIPOS DE ENTIDAD (id: que abarca):
+{entities_desc}
 
-TIPOS DE RELACION:
-{relations}
+TIPOS DE RELACION (id: tipos validos en "desde" -> tipos validos en "hasta", con un ejemplo que fija la direccion):
+{relations_desc}
+
+UNA MOLECULA DEL ORGANISMO NO ES UN FARMACO NI UN PROCEDIMIENTO:
+  SI: "la aldehido deshidrogenasa oxida el acetaldehido" -> nombre "aldehído deshidrogenasa" con tipo molecula_biologica
+  NO: "las enzimas hepaticas se elevan" -> "enzimas" no es una entidad sino el nombre de la clase; la entidad es "enzimas hepáticas", tal como el texto la nombra
 
 {fragments}
 
