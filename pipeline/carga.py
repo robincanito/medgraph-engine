@@ -44,6 +44,21 @@ CAMPOS_PARENT = {
     "titulo_capitulo": "", "titulo_seccion": "",
 }
 
+# LOS CAMPOS OPCIONALES: los que se escriben SOLO SI EL PARSEO LOS TRAJO (18-sep-2026, T5).
+#
+# POR QUE NO VAN EN LA TABLA DE ARRIBA. Ahi el valor es el DEFAULT y `None` significa
+# "obligatorio, KeyError si falta"; un campo cuyo valor legitimo es `null` no se puede declarar
+# asi. Y un default inventado seria peor: `pagina_impresa: 0` diria "este libro dice pagina 0".
+#
+# LA AUSENCIA Y EL NULL SON DISTINTOS, y por eso la regla es "si la clave esta, se escribe".
+#   · la clave NO esta  -> un `parsed/*.json` anterior a esta tanda: no se toca la propiedad, y si
+#     el chunk ya tenia una pagina impresa de una corrida anterior, la conserva;
+#   · la clave esta en None -> el parseo de HOY miro el libro y no encontro serie: se escribe
+#     `null`, que en Neo4j BORRA la propiedad. Un re-parseo que ya no encuentra la serie no puede
+#     dejar en el grafo un numero que ya no sostiene.
+CAMPOS_OPCIONALES_CHUNK = ("pagina_impresa", "pagina_impresa_fin")
+CAMPOS_OPCIONALES_PARENT = CAMPOS_OPCIONALES_CHUNK
+
 # ON MATCH SET corre ANTES del SET final, con c.text todavia viejo: ahi se decide si el
 # embedding sigue valiendo. En un chunk nuevo no hay nada que invalidar.
 CYPHER_MERGE_CHUNKS = """
@@ -91,12 +106,17 @@ MERGE (c1)-[:SIGUE_A]->(c2)
 """
 
 
-def preparar(items: list, campos: dict) -> list:
+def preparar(items: list, campos: dict, opcionales: tuple = ()) -> list:
     """[{id, props}] con EXACTAMENTE los campos declarados: defaults para lo ausente,
-    KeyError para un obligatorio que falta, y nada mas (ni embedding ni campos raros)."""
+    KeyError para un obligatorio que falta, y nada mas (ni embedding ni campos raros).
+
+    `opcionales` viaja solo si la clave ESTA en el item, con el valor que traiga —incluido
+    `null`—: ver `CAMPOS_OPCIONALES_CHUNK` para por que la ausencia y el null no son lo mismo.
+    """
     salida = []
     for it in items:
         props = {k: (it[k] if d is None else it.get(k, d)) for k, d in campos.items()}
+        props.update({k: it[k] for k in opcionales if k in it})
         salida.append({"id": it["id"], "props": props})
     return salida
 
@@ -126,8 +146,8 @@ def cargar_libro(write, libro_id: str, children: list, parents: list, on_progres
         if on_progress:
             on_progress("upload", pct, msg)
 
-    ch = preparar(children, CAMPOS_CHUNK)
-    pa = preparar(parents, CAMPOS_PARENT)
+    ch = preparar(children, CAMPOS_CHUNK, CAMPOS_OPCIONALES_CHUNK)
+    pa = preparar(parents, CAMPOS_PARENT, CAMPOS_OPCIONALES_PARENT)
 
     report(0, f"Cargando {len(ch)} chunks de {libro_id} (MERGE por id)...")
     for i in range(0, len(ch), BATCH_SIZE):

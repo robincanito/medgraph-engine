@@ -262,6 +262,96 @@ AVISO_DE_DERECHOS = re.compile(
     re.MULTILINE)
 
 # ─────────────────────────────────────────────────────────────────────────────────────────
+# LA PAGINA IMPRESA (18-sep-2026, tanda T5, docs/DISENO-pagina-impresa-18sep.md §2.1).
+#
+# QUE PROBLEMA CIERRA. `page_start` es el indice FISICO 1-based del PDF, y es lo que se cita hoy:
+# "p. 1564" donde el libro, en esa hoja, dice 1521. El numero impreso no esta en las etiquetas del
+# PDF (`get_label()` no se usa y no serviria) y no se puede inventar: esta en el BORDE de cada
+# pagina, que es justo lo que los filtros de maqueta borran antes de que nadie lo mire.
+#
+# UNA PREMISA DEL DISEÑO RESULTO FALSA, Y CAMBIA DONDE SE CAPTURA. El diseño dice "mirar cada linea
+# que `lineas_repetidas` va a descartar". Medido el 18-sep-2026 en Farreras (paginas fisicas
+# 1560-1565): el folio es su PROPIA linea en el borde de arriba —"1521", y debajo "Capitulo 184
+# Traumatismo craneoencefalico"— y CAMBIA en cada pagina, asi que `lineas_repetidas` —que exige la
+# linea IDENTICA en >= 3 paginas— no lo ve nunca; su propio docstring ya lo decia ("el pie que lleva
+# el numero de pagina EN LA MISMA LINEA no es identico entre paginas y sobrevive"). Quien se lo come
+# es `quitar_folio`, que corre ANTES y por pagina, dentro de `clean_text`.
+# Por eso la captura mira el BORDE DEL TEXTO CRUDO —las mismas `LINEAS_DE_BORDE` lineas no vacias de
+# arriba y de abajo que usan los dos filtros—, antes de los dos. Es un superconjunto de "lo que se va
+# a descartar" (toda linea que cualquiera de los dos filtros saca esta en ese borde) y la regla de la
+# serie se encarga de tirar lo que sobra.
+#
+# LA REGLA ES LA SERIE, NO EL NUMERO SUELTO. En un encabezado corrido conviven el folio y el numero
+# de capitulo —"266 Infeccion del tracto urinario 1521"— y el unico que cumple "+1 por pagina fisica"
+# es el folio. Es una regla de FORMA, sin titulares, que es la doctrina de `clean_text` desde el
+# 13-sep. Sin serie confiable el campo queda en None, y eso es una respuesta: este libro no dice que
+# pagina es.
+
+#: Un token que puede ser un folio: hasta cuatro digitos, el mismo techo que `FOLIO_SUELTO`.
+TOKEN_DE_FOLIO = re.compile(r"^\d{1,4}$")
+#: Lo que la maqueta le pega al folio y no es parte del numero ("— 45 —", "[12]", "45.").
+PUNTUACION_DE_FOLIO = ".,;:()[]{}<>-—–·|/\\*"
+
+# CUANTAS PAGINAS TIENE QUE CUBRIR UNA SERIE PARA PUBLICARSE. CINCO, y el numero esta medido
+# (18-sep-2026, 36 PDF del arbol `neo4j/`, leidos sin escribir nada):
+#   · en los libros que NO tienen folio en el borde, la serie mas larga llega a DOS paginas —
+#     Argente-Alvarez (2 en 400 paginas miradas), Goodman & Gilman (2 en 400), y 1 en los ocho
+#     documentos chicos del muestreo—;
+#   · en los que SI lo tienen, cubre de 6 a 382 — Abbas 382/400, Harrison 371/400, Pediatria en Red
+#     360/400, Farreras 349/400, Oftalmologia 323/377, DeVita 255/400, y 6 de 7 en una resolucion.
+# El umbral va en el medio de las dos mediciones y por encima de TODO falso positivo observado.
+MIN_PAGINAS_SERIE = 5
+
+# CUANTAS PAGINAS SEGUIDAS SIN FOLIO ADMITE UNA SERIE. La portadilla de capitulo casi nunca lo lleva,
+# ni la lamina de figuras, ni el verso en blanco: exigir paginas fisicas consecutivas parte la serie
+# de un tratado en decenas de pedazos. CINCO, medido sobre los mismos 36 PDF, mirando cuanto cubre
+# la serie ganadora segun el hueco admitido:
+#   Farreras  179 / 179 / 284 / 284 / 349 / 349   (hueco 0 / 1 / 2 / 3 / 5 / 10)
+#   Harrison  119 / 222 / 371 / 371 / 371 / 371
+#   Oftalmol.  31 /  60 /  93 / 323 / 323 / 323
+#   Ped.enRed 164 / 164 / 211 / 360 / 360 / 360
+#   Abbas     197 / 382 / 382 / 382 / 382 / 382
+# Farreras es el que mas hueco necesita (5); de 5 a 10 no cambia NI UN documento de los 36. Y el
+# hueco es el techo de lo que la propagacion puede inventar: como mucho cinco paginas seguidas.
+MAX_HUECO_SERIE = 5
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# LOS CINCO CAMINOS POR LOS QUE UN ENCABEZADO SE PIERDE (18-sep-2026, T5, §2.2 del diseño).
+#
+# EL CASO MEDIDO: las pp. 158-165 del corpus llevan "Capitulo 267" y la 166 ya lleva "269". El 268
+# nunca matcheo, y hay cinco caminos citables por los que eso pasa:
+#   1. `clean_text` borra la linea de solo digitos antes de que el detector la vea -> lo cura
+#      `quitar_folio` (arriba), que conserva el numero cuando la linea anterior es la palabra de un
+#      encabezado;
+#   2. los patrones son sensibles a tilde y caja ("CAPITULO 268" no entra por `^Capítulo\s+\d+`) ->
+#      lo cura `_compilar_patrones`, que agrega una variante plegada e insensible a la caja;
+#   3. `.match` esta anclado al inicio y el encabezado corrido puede dejar el folio pegado adelante
+#      -> lo cura `FOLIO_PEGADO`, que ofrece la linea sin ese prefijo como segunda variante;
+#   4. las lineas de menos de 3 caracteres se saltean -> sigue igual, SALVO la mitad numerica de un
+#      encabezado partido, que viaja unida a su palabra y por lo tanto nunca se mide sola;
+#   5. el filtro de maqueta corre antes -> ya no es una perdida: ahora CAPTURA antes de borrar
+#      (`candidatos_de_folio`).
+#
+# LA PALABRA DE UN ENCABEZADO DE CAPITULO, SOLA EN SU RENGLON. Es una lista CERRADA —sin un solo
+# titular, igual que `AVISO_DE_DERECHOS` y `ENCABEZADO_REFERENCIAS`— y no un patron del perfil:
+# `quitar_folio` corre por pagina dentro de `clean_text`, que no conoce ni el libro ni la estrategia,
+# y hacerle llegar los patrones significaria pasarle el dominio a la limpieza de texto.
+#
+# SON LAS TRES PALABRAS DE `PATRONES_MEDICINA["_default"]["capitulo"]` (seccion, capitulo, parte) y
+# sus formas en ingles, y NINGUNA MAS. "Titulo", "Libro", "Unidad" y "Anexo" quedaron afuera con un
+# test rojo por delante (18-sep-2026): `Titulo` suelto es tambien el rotulo de cualquier titulo, y
+# con el en la lista la regla dejaba de sacar el folio de toda pagina cuyo borde empieza con esa
+# palabra —lo cazo `test_quitar_folio_es_puro_y_acepta_el_borde_como_parametro`, que es de la tanda
+# del folio del 16-sep—. El diseño dice "encabezado de capitulo": es esto, literal.
+ENCABEZADO_PARTIDO = re.compile(
+    r"(?i)^\W*(?:cap[ií]tulo|secci[oó]n|parte|chapter|section|part)\W*$")
+
+# EL FOLIO PEGADO ADELANTE: "1521 Capitulo 184 Traumatismo...". Se exige el espacio despues de los
+# digitos —`\d{1,4}\s+`— para no morder "12.5 mg" ni "1521Capitulo": lo que se saca es un TOKEN
+# suelto de maqueta, no el principio de una cifra.
+FOLIO_PEGADO = re.compile(r"^\s*\d{1,4}\s+")
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
 # LA CALIDAD DEL TEXTO, POR CHUNK Y POR FORMA (16-sep-2026, §1.6 y §4.2 del diseño).
 #
 # QUE HUECO CIERRA. `text_quality` NO lo calculaba el pipeline: cero ocurrencias en
@@ -406,10 +496,121 @@ MAX_PERDIDA_TOKENS = 0.02          # ver _pierde_contenido
 MAX_PERDIDA_TABLA = 0.10
 
 
+def sin_acentos(texto: str) -> str:
+    """El texto sin tildes ni diéresis, CONSERVANDO la caja.
+
+    Es la mitad de `normalize_for_search` que también necesita `detect_structure` para decidir
+    si una línea es un encabezado (18-sep-2026, T5): ahí la comparación se hace sobre el texto
+    plegado —`CAPITULO 268` tiene que entrar por `^CAPÍTULO\\s+\\d+`— pero el título que se
+    GUARDA es el original, con sus tildes. Una sola definición de "quitar acentos" para las dos
+    cosas: dos serían dos normalizaciones que divergen en silencio.
+    """
+    nfkd = unicodedata.normalize('NFKD', texto)
+    return ''.join(c for c in nfkd if not unicodedata.combining(c))
+
+
 def normalize_for_search(text: str) -> str:
     """Quita acentos y pasa a minúsculas para full-text search."""
-    nfkd = unicodedata.normalize('NFKD', text)
-    return ''.join(c for c in nfkd if not unicodedata.combining(c)).lower()
+    return sin_acentos(text).lower()
+
+
+def candidatos_de_folio(texto: str, borde: int = LINEAS_DE_BORDE) -> set:
+    """Los números que PUEDEN ser la página impresa de esta página: los del borde.
+
+    Args:
+        texto: el texto CRUDO de una página (antes de `clean_text`: ver el porqué arriba, en el
+            bloque de `MIN_PAGINAS_SERIE` — `quitar_folio` se come justo la línea que interesa).
+        borde: cuántas líneas no vacías de arriba y de abajo se miran. Las mismas que usan los
+            dos filtros de maqueta, porque el folio vive donde ellos borran.
+
+    Returns:
+        Conjunto de enteros. Vacío si el borde no trae ninguno.
+
+    PRIMERO Y ÚLTIMO TOKEN DE CADA LÍNEA, y nada del medio. Un encabezado corrido pone el folio
+    en una punta —"266 Infección del tracto urinario 1521"— y el número que está en el medio es
+    otra cosa (el número de capítulo, una cifra del título). Mirar el medio sólo agregaría ruido
+    que después hay que filtrar con la serie.
+
+    ES PURA: recibe texto, devuelve números. No sabe de qué libro es ni en qué página está.
+    """
+    lineas = [x for x in (linea.strip() for linea in texto.split('\n')) if x]
+    if not lineas:
+        return set()
+    salida = set()
+    for linea in lineas[:borde] + lineas[-borde:]:
+        # La puntuación se saca ANTES de elegir las puntas, y no después: la maqueta escribe
+        # "— 45 —", donde el primer token es una raya y el folio queda segundo. Un token que
+        # después de sacarle la puntuación no deja nada no es un token.
+        tokens = [t for t in (tok.strip(PUNTUACION_DE_FOLIO) for tok in linea.split()) if t]
+        if not tokens:
+            continue
+        for token in (tokens[0], tokens[-1]):
+            if TOKEN_DE_FOLIO.match(token):
+                salida.add(int(token))
+    return salida
+
+
+def series_de_folio(candidatos: dict, hueco_max: int = MAX_HUECO_SERIE) -> list:
+    """Las series de folio que hay en los candidatos: `[(desfase, [páginas confirmadas])]`.
+
+    Args:
+        candidatos: `{página física: {números del borde}}`, lo que devuelve `candidatos_de_folio`.
+        hueco_max: cuántas páginas seguidas sin confirmar admite una serie (ver `MAX_HUECO_SERIE`).
+
+    UNA SERIE ES UN DESFASE. "Crece exactamente de a uno entre páginas físicas consecutivas" es lo
+    mismo que "`impresa - física` es constante": cada candidato vota por el desfase `n - página`, y
+    las páginas que votan el mismo desfase son las que confirman esa serie. Se parten en corridas
+    donde el hueco entre dos confirmaciones pasa de `hueco_max`, porque dos tramos separados por
+    media guía no son la misma numeración.
+
+    ES PURA y no ordena la salida: el criterio de "la más larga" es de `paginas_impresas`, que es
+    quien tiene que decidir qué hacer con un empate.
+    """
+    por_desfase = {}
+    for pagina, numeros in candidatos.items():
+        for n in numeros:
+            por_desfase.setdefault(n - pagina, []).append(pagina)
+
+    salida = []
+    for desfase, paginas in por_desfase.items():
+        paginas = sorted(set(paginas))
+        corrida = [paginas[0]]
+        for pagina in paginas[1:]:
+            if pagina - corrida[-1] - 1 > hueco_max:
+                salida.append((desfase, corrida))
+                corrida = [pagina]
+            else:
+                corrida.append(pagina)
+        salida.append((desfase, corrida))
+    return salida
+
+
+def paginas_impresas(candidatos: dict, minimo: int = MIN_PAGINAS_SERIE,
+                     hueco_max: int = MAX_HUECO_SERIE) -> dict:
+    """`{página física: página impresa}` de la serie más larga, o `{}` si no hay una confiable.
+
+    LAS TRES DECISIONES, y las tres son del diseño §2.1:
+
+      1. GANA LA MÁS LARGA (la que confirma más páginas), y se exige `minimo` confirmaciones. El
+         número está medido en `MIN_PAGINAS_SERIE`: en un libro sin folio la serie más larga llega
+         a dos páginas.
+      2. UN EMPATE EXACTO NO PUBLICA NADA. Dos series de la misma longitud son dos numeraciones
+         igual de plausibles, y elegir una es tirar una moneda: se devuelve `{}`, que significa
+         "este libro no dice qué página es" y es una respuesta honesta.
+      3. EL DESFASE SE PROPAGA DENTRO DEL TRAMO Y NUNCA FUERA. Entre la primera y la última página
+         confirmada, TODA página recibe `física + desfase` —la portadilla de capítulo casi nunca
+         lleva folio, y es exactamente la página que hay que poder citar—. Fuera del tramo no se
+         escribe nada: ahí no hay evidencia de que la numeración siga. Lo que la propagación puede
+         inventar está acotado por `MAX_HUECO_SERIE`: como mucho cinco páginas seguidas.
+    """
+    series = series_de_folio(candidatos, hueco_max)
+    largas = sorted((s for s in series if len(s[1]) >= minimo), key=lambda s: -len(s[1]))
+    if not largas:
+        return {}
+    if len(largas) > 1 and len(largas[0][1]) == len(largas[1][1]):
+        return {}
+    desfase, paginas = largas[0]
+    return {p: p + desfase for p in range(paginas[0], paginas[-1] + 1)}
 
 
 def quitar_folio(texto: str, borde: int = LINEAS_DE_BORDE) -> str:
@@ -423,11 +624,20 @@ def quitar_folio(texto: str, borde: int = LINEAS_DE_BORDE) -> str:
 
     Es PURA y recibe el texto de UNA página: el borde es el de esa página, no el del documento.
     El `borde` es parámetro para poder medirlo en un test sin tocar la constante del módulo.
+
+    LA LÍNEA DE SÓLO DÍGITOS SE CONSERVA SI LA ANTERIOR ES LA PALABRA DE UN ENCABEZADO
+    (18-sep-2026, T5, §2.2.3 del diseño): es el *"Capítulo / 268"* que la maqueta parte en dos
+    renglones. Hasta hoy esta función se comía el "268" —está en el borde y es sólo dígitos— y
+    después `detect_structure` no tenía con qué reconocer el capítulo: ése es el camino 1 de los
+    cinco por los que el capítulo 268 nunca matcheó y las pp. 158-165 salieron rotuladas "267".
     """
     lineas = texto.split('\n')
     no_vacias = [i for i, linea in enumerate(lineas) if linea.strip()]
     if not no_vacias:
         return texto
+    # La línea no vacía anterior a cada una: es contra ella que se decide si el número es un
+    # folio o la segunda mitad de un encabezado partido.
+    anterior = {idx: no_vacias[k - 1] for k, idx in enumerate(no_vacias) if k}
     # La zona de abajo se recorre de afuera hacia adentro: el folio del pie es la ÚLTIMA línea
     # antes que la anteúltima, igual que el del encabezado es la primera antes que la segunda.
     # Y NO SE SOLAPAN: en una página de pocas líneas las dos zonas comparten renglones, y sin
@@ -436,9 +646,13 @@ def quitar_folio(texto: str, borde: int = LINEAS_DE_BORDE) -> str:
     abajo = [i for i in no_vacias[-borde:] if i not in set(arriba)]
     for zona in (arriba, abajo[::-1]):
         for i in zona:
-            if FOLIO_SUELTO.match(lineas[i]):
-                lineas[i] = ''
-                break   # a lo sumo una por borde: la de al lado ya es contenido
+            if not FOLIO_SUELTO.match(lineas[i]):
+                continue
+            previa = anterior.get(i)
+            if previa is not None and ENCABEZADO_PARTIDO.match(lineas[previa].strip()):
+                continue   # "Capítulo\n268": ese número es del encabezado, no de la maqueta
+            lineas[i] = ''
+            break   # a lo sumo una por borde: la de al lado ya es contenido
     return '\n'.join(lineas)
 
 
@@ -1267,6 +1481,86 @@ def _clean_spaced_text(text: str) -> str:
     return RE_TEXTO_ESPACIADO.sub(collapse_spaced, text)
 
 
+def _compilar_patrones(patrones: list, plegar: bool) -> list:
+    """`[(regex, sobre_plegado)]` de una lista de patrones del dominio.
+
+    Cada patrón se compila DOS veces cuando `plegar`: tal cual (contra la línea original) y en su
+    versión sin tildes con `IGNORECASE` (contra la línea plegada). Así `CAPITULO 268` y
+    `capítulo 268` entran por `^Capítulo\\s+\\d+` sin tocar un solo patrón del perfil, que es la
+    condición del encargo: se cambia cómo se compilan, no lo que declara el YAML.
+
+    EL PATRÓN TAMBIÉN SE PLIEGA, y no sólo el texto: `^CAPÍTULO\\s+\\d+` contra "capitulo 268" no
+    matchea ni con `IGNORECASE`, porque la `Í` del patrón no es la `i` del texto.
+
+    SI PLEGAR ROMPE LA EXPRESIÓN, se conserva sólo la original. Un perfil puede traer un rango
+    de caracteres acentuados (`[À-ÿ]`) que al descomponerse deje de ser un rango válido; eso tiene
+    que degradar a la conducta de siempre y quedar en el log, nunca hacer fallar una ingesta.
+
+    `plegar` ES FALSE PARA LOS PATRONES DE SECCIÓN, y el diseño pedía las dos listas. No se puede,
+    y está medido (18-sep-2026): el patrón genérico de sección es
+    `^[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\\s]{5,60}$` —"una línea entera en mayúsculas"— y con `IGNORECASE` pasa
+    a ser "cualquier línea de 6 a 61 letras y espacios". Sobre el PDF sintético de medicina, 22 de
+    sus 199 líneas matchean un patrón de sección con el plegado contra las 9 que SON secciones:
+    trece líneas de prosa ("estudio", "opuestas") se vuelven títulos. La insensibilidad a la caja
+    sirve donde el patrón nombra una PALABRA (capítulo, sección, parte) —que es el caso del
+    off-by-one que esta tanda vino a curar, `CAPITULO 268`—; donde la caja ES el criterio, lo
+    destruye.
+    """
+    compilados = []
+    for patron in patrones:
+        compilados.append((re.compile(patron, re.MULTILINE), False))
+        if not plegar:
+            continue
+        try:
+            compilados.append(
+                (re.compile(sin_acentos(patron), re.MULTILINE | re.IGNORECASE), True))
+        except re.error as e:
+            log.warning("el patrón %r no se puede plegar (%s): queda sólo la forma exacta",
+                        patron, e)
+    return compilados
+
+
+def _variantes_de_linea(linea: str) -> list:
+    """Las formas de una línea contra las que se prueban los patrones, en orden de preferencia.
+
+    Hoy son dos: la línea tal cual y —si empieza con un folio pegado— la línea sin él. El título
+    que se guarda es la variante que MATCHEÓ, así que el folio de maqueta no viaja al título.
+    """
+    variantes = [linea]
+    sin_folio = FOLIO_PEGADO.sub("", linea, count=1)
+    if sin_folio != linea and len(sin_folio) >= 3:
+        variantes.append(sin_folio)
+    return variantes
+
+
+def _unir_encabezados_partidos(lines: list) -> tuple:
+    """`(efectivas, consumidas)`: las líneas con las que DETECTAR, y las que ya viajan en otra.
+
+    La maqueta parte *"Capítulo 268"* en dos renglones —la palabra arriba, el número abajo— y así
+    ninguna de las dos matchea nada. Acá se las une para la DETECCIÓN: la línea de la palabra pasa
+    a valer "Capítulo 268" y la del número queda consumida (no abre un segmento propio ni se mide
+    contra el mínimo de 3 caracteres).
+
+    EL TEXTO NO SE TOCA. `detect_structure` corta los segmentos por índice de línea sobre `lines`,
+    que sigue siendo el original: unir acá no mueve una palabra de lugar y por lo tanto no puede
+    mover un corte del chunker.
+    """
+    efectivas = list(lines)
+    consumidas = set()
+    for i, linea in enumerate(lines):
+        if not ENCABEZADO_PARTIDO.match(linea.strip()):
+            continue
+        for j in range(i + 1, len(lines)):
+            siguiente = lines[j].strip()
+            if not siguiente:
+                continue
+            if FOLIO_SUELTO.match(siguiente):
+                efectivas[i] = f"{linea.strip()} {siguiente}"
+                consumidas.add(j)
+            break
+    return efectivas, consumidas
+
+
 def detect_structure(pages: list, libro_id: str, estrategia: Estrategia = POR_DEFECTO) -> list:
     """Detecta títulos de capítulo y sección en las páginas, POR POSICIÓN.
 
@@ -1305,11 +1599,23 @@ def detect_structure(pages: list, libro_id: str, estrategia: Estrategia = POR_DE
     UN SEGMENTO SE ABRE SÓLO CUANDO EL TÍTULO SE ASIGNA DE VERDAD: un patrón de sección que
     matchea pero no pasa el filtro de "línea corta sin oración" no abre nada, igual que
     antes no cambiaba el título.
+
+    LOS CINCO CAMINOS DEL ENCABEZADO PERDIDO se curan acá (18-sep-2026, T5): ver el bloque de
+    `ENCABEZADO_PARTIDO` arriba para la lista y `_compilar_patrones` / `_variantes_de_linea` /
+    `_unir_encabezados_partidos` para cada mitad. El TÍTULO QUE SE GUARDA ES SIEMPRE EL ORIGINAL
+    —con sus tildes y su caja—: lo plegado es la vara con que se DECIDE, nunca lo que viaja.
     """
     # Los patrones son del DOMINIO (pipeline/estrategia.py), no de este archivo.
     patterns = estrategia.patrones_de(libro_id)
-    cap_patterns = [re.compile(p, re.MULTILINE) for p in patterns["capitulo"]]
-    sec_patterns = [re.compile(p, re.MULTILINE) for p in patterns["seccion"]]
+    cap_patterns = _compilar_patrones(patterns["capitulo"], plegar=True)
+    sec_patterns = _compilar_patrones(patterns["seccion"], plegar=False)
+
+    def matchea(compilados: list, variante: str, plegada: str):
+        """La variante si alguno de los patrones la matchea (sobre su propia forma), o None."""
+        for pat, sobre_plegado in compilados:
+            if pat.match(plegada if sobre_plegado else variante):
+                return variante
+        return None
 
     current_capitulo = ""
     current_seccion = ""
@@ -1318,40 +1624,46 @@ def detect_structure(pages: list, libro_id: str, estrategia: Estrategia = POR_DE
     for page_data in pages:
         text = page_data["text"]
         lines = text.split('\n')
+        efectivas, consumidas = _unir_encabezados_partidos(lines)
         # [linea donde arranca, capitulo vigente, seccion vigente]. El primero hereda los
         # títulos de la página anterior: un párrafo partido entre dos páginas sigue
         # perteneciendo a su capítulo.
         segmentos = [[0, current_capitulo, current_seccion]]
 
-        for i, line in enumerate(lines):
+        for i, line in enumerate(efectivas):
             line_stripped = line.strip()
-            if not line_stripped or len(line_stripped) < 3:
+            # El mínimo de 3 caracteres se mantiene; la mitad numérica de un encabezado partido
+            # no lo necesita porque ya viaja unida a su palabra (`consumidas`).
+            if not line_stripped or len(line_stripped) < 3 or i in consumidas:
                 continue
+            variantes = [(v, sin_acentos(v)) for v in _variantes_de_linea(line_stripped)]
 
             # Detectar capítulo
             is_capitulo = False
-            for pat in cap_patterns:
-                if pat.match(line_stripped):
-                    # Limpiar: reconstruir texto con espacios intercalados
-                    # "PA R T E 3 : A M E T R O P Í A S" → "PARTE 3: AMETROPÍAS"
-                    clean_cap = _clean_spaced_text(line_stripped)
-                    clean_cap = re.sub(r'\s{2,}', ' ', clean_cap).strip()
-                    current_capitulo = clean_cap[:120]
-                    current_seccion = ""
-                    is_capitulo = True
-                    break
+            for variante, plegada in variantes:
+                encabezado = matchea(cap_patterns, variante, plegada)
+                if encabezado is None:
+                    continue
+                # Limpiar: reconstruir texto con espacios intercalados
+                # "PA R T E 3 : A M E T R O P Í A S" → "PARTE 3: AMETROPÍAS"
+                clean_cap = _clean_spaced_text(encabezado)
+                clean_cap = re.sub(r'\s{2,}', ' ', clean_cap).strip()
+                current_capitulo = clean_cap[:120]
+                current_seccion = ""
+                is_capitulo = True
+                break
 
             # Detectar sección (solo si no fue detectado como capítulo)
             asigno = is_capitulo
             if not is_capitulo:
-                for pat in sec_patterns:
-                    if pat.match(line_stripped):
-                        # Solo aceptar como sección si es línea corta (título, no contenido)
-                        # y no contiene punto seguido de más texto (indica oración, no título)
-                        if len(line_stripped) < 80 and line_stripped.count('.') <= 2:
-                            current_seccion = line_stripped[:100]
-                            asigno = True
-                            break
+                for variante, plegada in variantes:
+                    encabezado = matchea(sec_patterns, variante, plegada)
+                    # Solo aceptar como sección si es línea corta (título, no contenido)
+                    # y no contiene punto seguido de más texto (indica oración, no título)
+                    if encabezado and len(encabezado) < 80 and encabezado.count('.') <= 2:
+                        current_seccion = encabezado[:100]
+                        asigno = True
+                        break
 
             if not asigno:
                 continue
@@ -1404,7 +1716,8 @@ def _find_sentence_boundary(words: list, target_idx: int) -> int:
 def generate_chunks_v2(structured_pages: list, libro_id: str,
                        target_size: int | None = None,
                        overlap: int | None = None,
-                       estrategia: Estrategia = POR_DEFECTO) -> tuple:
+                       estrategia: Estrategia = POR_DEFECTO,
+                       impresas: dict | None = None) -> tuple:
     """Genera child chunks y parent chunks a partir de páginas estructuradas.
 
     Args:
@@ -1413,12 +1726,20 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
         target_size: Palabras objetivo por chunk. None = lo que diga la estrategia.
         overlap: Palabras de solape. None = lo que diga la estrategia.
         estrategia: Estrategia del dominio (tamaños). Default: la de medicina de siempre.
+        impresas: `{página física: página impresa}` (`paginas_impresas`). None o vacío —el
+            material sin páginas, y todo PDF sin serie de folio confiable— deja
+            `pagina_impresa`/`pagina_impresa_fin` en None en TODOS los chunks. Las claves viajan
+            igual: `null` significa "este libro no dice qué página es", y eso es una respuesta.
 
     Returns:
         (child_chunks, parent_chunks)
 
     `target_size` y `overlap` siguen aceptandose sueltos porque hay llamadores viejos que los
     pasan; cuando vienen, ganan sobre la estrategia (override puntual de una corrida).
+
+    `page_start`/`page_end` NO CAMBIAN (18-sep-2026, T5): siguen siendo el índice FÍSICO, que es
+    lo que ata el chunk al PDF y lo que empareja un re-parseo con el grafo. La página impresa va
+    al lado, en su propio campo.
 
     NO_CONTENIDO ES UNA FRONTERA DURA (18-sep-2026, hallazgo V4 del banco; ver el comentario
     largo sobre `naturaleza_por_linea`). Cada palabra llega con la naturaleza de su linea
@@ -1439,6 +1760,7 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
     """
     target_size = estrategia.target_size if target_size is None else target_size
     overlap = estrategia.overlap if overlap is None else overlap
+    impresas = impresas or {}
     # Construir un buffer continuo con metadata por página
     all_words = []       # Lista plana de palabras
     word_meta = []       # Metadata por palabra: (page, capitulo, seccion)
@@ -1527,6 +1849,7 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             prev["text"] = prev["text"] + " " + " ".join(all_words[pos:end])
             prev["word_count"] = len(prev["text"].split())
             prev["page_end"] = word_meta[end - 1][0]
+            prev["pagina_impresa_fin"] = impresas.get(prev["page_end"])
             # La calidad se vuelve a medir sobre el texto FINAL del chunk fusionado: es una
             # medicion nueva (16-sep-2026) y medirla sobre un prefijo seria mentir barato.
             # `tipo_contenido` NO se recalcula a proposito: es la conducta historica, y
@@ -1567,6 +1890,10 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             "libro_id": libro_id,
             "page_start": page_start,
             "page_end": page_end,
+            # La página que dice el libro, si el documento la dijo. Sale de `page_start`/`page_end`
+            # y no de una segunda cuenta: es la MISMA página, nombrada como la nombra la fuente.
+            "pagina_impresa": impresas.get(page_start),
+            "pagina_impresa_fin": impresas.get(page_end),
             "text": chunk_text,
             "word_count": end - pos,
             "titulo_capitulo": capitulo,
@@ -1631,6 +1958,10 @@ def generate_chunks_v2(structured_pages: list, libro_id: str,
             "libro_id": libro_id,
             "page_start": window[0]["page_start"],
             "page_end": window[-1]["page_end"],
+            # El padre cita el mismo tramo que sus hijos: la impresa sale de los hijos de las
+            # puntas y no de una segunda mirada al mapa, para que no puedan discrepar.
+            "pagina_impresa": window[0]["pagina_impresa"],
+            "pagina_impresa_fin": window[-1]["pagina_impresa_fin"],
             "text": parent_text,
             "word_count": parent_words,
             "titulo_capitulo": window[0]["titulo_capitulo"],
@@ -1683,9 +2014,17 @@ def parse_pdf_v2(pdf_path: str, libro_id: str, estrategia: Estrategia = POR_DEFE
 
     # Extraer texto por página
     pages = []
+    candidatos = {}
     for i in range(total_pages):
         page = doc[i]
         text = extraer_texto_pagina(page, decodificador)
+        # LA PÁGINA IMPRESA SE CAPTURA ANTES DE LIMPIAR (18-sep-2026, T5): `clean_text` corre
+        # `quitar_folio`, que se lleva justo la línea del número. Ver `candidatos_de_folio`.
+        # Se guarda TAMBIÉN de las páginas que después se descartan por no tener texto útil: una
+        # hoja casi en blanco con su folio es evidencia de la serie, aunque no aporte un chunk.
+        numeros = candidatos_de_folio(text)
+        if numeros:
+            candidatos[i + 1] = numeros
         text = clean_text(text)
 
         if len(text.strip()) > 20:
@@ -1707,11 +2046,22 @@ def parse_pdf_v2(pdf_path: str, libro_id: str, estrategia: Estrategia = POR_DEFE
         for p in pages:
             p["text"] = quitar_lineas(p["text"], descartar)
 
+    # LA SERIE DEL FOLIO, con el documento completo: "crece de a uno entre páginas físicas
+    # consecutivas" no se puede ver mirando una página, igual que la línea repetida.
+    impresas = paginas_impresas(candidatos)
+    if impresas:
+        primera, ultima = min(impresas), max(impresas)
+        log.info("  página impresa: pp. físicas %d-%d → %d-%d (desfase %+d)",
+                 primera, ultima, impresas[primera], impresas[ultima], impresas[primera] - primera)
+    else:
+        log.info("  sin serie de folio confiable: pagina_impresa queda en null")
+
     # Detectar estructura
     structured = detect_structure(pages, libro_id, estrategia)
 
     # Generar chunks
-    children, parents = generate_chunks_v2(structured, libro_id, estrategia=estrategia)
+    children, parents = generate_chunks_v2(structured, libro_id, estrategia=estrategia,
+                                           impresas=impresas)
     log.info(f"  Resultado: {len(children)} children, {len(parents)} parents")
 
     return children, parents
