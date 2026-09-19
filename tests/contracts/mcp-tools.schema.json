@@ -47,8 +47,8 @@
       "properties": {
         "name": {
           "type": "string",
-          "enum": ["search", "fetch", "list_sources", "search_entities", "expand_concept", "deep_dive", "unified_query", "evidence"],
-          "description": "VOCABULARIO CERRADO. Los nombres son parte del contrato y no del gusto de cada instancia: un agente escrito contra `search` de MedGraph tiene que funcionar contra `search` de LexGraph sin tocar una linea. Sin prefijo de instancia a proposito (`medgraph_search` era el defecto del stdio: el cliente ya sabe a que servidor le habla, y el prefijo obliga a reescribir el agente al cambiar de grafo)."
+          "enum": ["search", "fetch", "list_sources", "search_entities", "expand_concept", "deep_dive", "unified_query", "evidence", "create_entity", "update_entity", "delete_entity"],
+          "description": "VOCABULARIO CERRADO. Los nombres son parte del contrato y no del gusto de cada instancia: un agente escrito contra `search` de MedGraph tiene que funcionar contra `search` de LexGraph sin tocar una linea. Sin prefijo de instancia a proposito (`medgraph_search` era el defecto del stdio: el cliente ya sabe a que servidor le habla, y el prefijo obliga a reescribir el agente al cambiar de grafo). Las tres ultimas (`create_entity`, `update_entity`, `delete_entity`) son la CAPACIDAD DE ESCRITURA de §9, opcional y aditiva: una instancia que no escribe no las publica y cumple el contrato entero. Son tres y no una con un argumento `metodo` porque el directorio de conectores de Claude RECHAZA una tool que acepta metodos seguros e inseguros a la vez."
         },
         "title": {
           "type": "string",
@@ -64,6 +64,26 @@
         "outputSchema": { "$ref": "#/$defs/EsquemaDeSalida" }
       },
       "allOf": [
+        {
+          "description": "LAS OCHO DE LECTURA SIGUEN CLAVADAS. Hasta el 19-sep-2026 esto vivia como un `const` adentro de `Anotaciones` y valia para todas; se mueve aca, sin aflojarse, para que la apertura de §9 no toque a las que ya estaban. Una de las ocho que se declare escribible o destructiva es un error de schema, no una variante permitida.",
+          "if": { "required": ["name"], "properties": { "name": { "enum": ["search", "fetch", "list_sources", "search_entities", "expand_concept", "deep_dive", "unified_query", "evidence"] } } },
+          "then": { "properties": { "annotations": { "properties": { "readOnlyHint": { "const": true }, "destructiveHint": { "const": false } } } } }
+        },
+        {
+          "description": "LAS TRES DE ESCRITURA NO SON DE LECTURA, y decirlo es la mitad del punto: una tool que escribe con `readOnlyHint: true` pasaria la revision del directorio agrupada entre las seguras, y el cliente no le pediria confirmacion al usuario. Es exactamente el 'colarse por una anotacion' que la regla 2 prohibe.",
+          "if": { "required": ["name"], "properties": { "name": { "enum": ["create_entity", "update_entity", "delete_entity"] } } },
+          "then": { "properties": { "annotations": { "properties": { "readOnlyHint": { "const": false }, "openWorldHint": { "const": false } } } } }
+        },
+        {
+          "description": "`delete_entity` es destructiva SIEMPRE y lo fija el contrato, no la instancia: retirar un recurso hace que un dato que existia deje de existir, y no hay dominio en el que eso sea otra cosa. `create` y `update` los declara la instancia segun §9.3.",
+          "if": { "required": ["name"], "properties": { "name": { "const": "delete_entity" } } },
+          "then": { "properties": { "annotations": { "properties": { "destructiveHint": { "const": true } } } } }
+        },
+        {
+          "description": "EL PAYLOAD DE UNA ESCRITURA RECHAZA LO QUE NO ES DEL RECURSO (§9.2). La regla 6 —cada argumento un escalar— es de lectura y una escritura no puede cumplirla: crear una deuda con su cronograma de veinticuatro cuotas es un objeto con una lista adentro. En su lugar, `additionalProperties: false` en el schema de entrada. POR QUE ESTO Y NO 'el servidor ignora lo que no conoce', que es lo que hace medio internet: porque un campo ignorado sin decirlo hace que el agente crea que cargo algo que no cargo, y en la proxima vuelta lo de por hecho. Es la regla 4 aplicada a la ENTRADA.",
+          "if": { "required": ["name"], "properties": { "name": { "enum": ["create_entity", "update_entity", "delete_entity"] } } },
+          "then": { "properties": { "inputSchema": { "required": ["additionalProperties"], "properties": { "additionalProperties": { "const": false } } } } }
+        },
         {
           "description": "`search` — descubrir unidades del corpus. `query` y `limit` son del contrato; `filtros` (acotar QUE fuentes pueden contestar), `garantizar` (reservar lugares para fuentes nombradas) y `agrupar` (colapsar recortes de la misma unidad padre) son opcionales pero, si se publican, se llaman y significan ESTO. La salida lleva `degraded`, `notice` y `procedencia` SIEMPRE: una lista vacia por caida del grafo se lee igual que 'no hay material' y el modelo contesta de su propio conocimiento sin decirlo (medido el 10-sep-2026).",
           "if": { "required": ["name"], "properties": { "name": { "const": "search" } } },
@@ -422,14 +442,14 @@
     },
     "Anotaciones": {
       "title": "Anotaciones",
-      "description": "Las tres anotaciones de MCP, y las tres son OBLIGATORIAS: el directorio de conectores de Claude agrupa las tools por `readOnlyHint`/`destructiveHint` y una tool sin anotaciones no pasa la revision; ChatGPT las exige tambien (§8 del diseño). NOMOS GRAPH ES DE SOLO LECTURA: `readOnlyHint` es true y `destructiveHint` es false en TODAS, porque escribir en el grafo es trabajo de admin/v1 con rol, no de un chat. El dia que exista una tool que escriba, entra con su propia clase en el contrato y no colandose por una anotacion.",
+      "description": "Las tres anotaciones de MCP, y las tres son OBLIGATORIAS: el directorio de conectores de Claude agrupa las tools por `readOnlyHint`/`destructiveHint` y una tool sin anotaciones no pasa la revision; ChatGPT las exige tambien (§8 del diseño). LOS VALORES NO SE FIJAN ACA SINO POR TOOL, en los `if/then` de `Tool`: hasta el 19-sep-2026 este objeto clavaba `readOnlyHint: true` y `destructiveHint: false` con un `const`, porque las ocho tools que existian eran de lectura. La clase de escritura de §9 no se podia ni expresar. Ahora el tipo es booleano y quien fija el valor es el nombre de la tool, que es donde la regla se puede leer al lado del caso que la justifica. LO QUE NO CAMBIO: las ocho de lectura siguen clavadas en true/false, y una que se declare escribible es un error de schema.",
       "type": "object",
       "required": ["readOnlyHint", "destructiveHint", "openWorldHint"],
       "additionalProperties": false,
       "properties": {
         "title": { "type": "string" },
-        "readOnlyHint": { "const": true, "description": "Siempre true en mcp/v1." },
-        "destructiveHint": { "const": false, "description": "Siempre false: no hay nada que destruir en una lectura." },
+        "readOnlyHint": { "type": "boolean", "description": "`true` en las ocho de lectura, `false` en las tres de escritura de §9. Lo fija el `if/then` del nombre, no este objeto." },
+        "destructiveHint": { "type": "boolean", "description": "EL DEFAULT DE LA ESPECIFICACION MCP ES `true`, asi que lo que hay que justificar es marcarlo `false`, no al reves. `false` en las ocho de lectura, porque no hay nada que destruir en una lectura. En escritura lo declara la instancia salvo `delete_entity`, que el contrato clava en `true`, y la regla es: si la operacion puede hacer que un dato que existia DEJE DE EXISTIR, es `true`. Reemplazar el cronograma de veinticuatro cuotas de una deuda es destructivo aunque la tool se llame `update`. Lo que no se acepta como motivo para ponerlo en `false` es que agrupe mejor en un directorio: esta anotacion es la que el cliente usa para decidir si pide confirmacion, y mentir ahi es mentirle a la persona que va a apretar si." },
         "idempotentHint": { "type": "boolean" },
         "openWorldHint": {
           "type": "boolean",
