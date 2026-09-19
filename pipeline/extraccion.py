@@ -67,6 +67,13 @@ por relacion, tres reglas nuevas) y mitad aca:
   4. El tipo que faltaba es una decision de PERFIL y no de codigo: entra solo, porque
      `ENTITY_TYPES` y el prompt se derivan de `tx`.
 
+LO QUE SE AGREGO EL 19-sep-2026 (`docs/DISENO-labels-del-perfil-19sep.md`): cuatro lecturas y
+ni un estado nuevo. `tipo_de_label`, `desc_de`, `sinonimos_de` y `tipos_con_ontologia` no las
+usa la EXTRACCION: las usa el RETRIEVAL, que hasta ese dia nombraba los labels a mano en
+dieciseis lugares y por eso iba atrasado —diez de doce tipos en un lado, nueve en otro, ocho en
+otro—. La taxonomia ya era la unica fuente para pedirle al modelo; desde hoy tambien lo es para
+buscar lo que el modelo dejo.
+
 SIN `print`: este paquete se replica al engine y lo vigila `test_bitacora.PAQUETE_SIN_PRINT`.
 Lo que hay que contar viaja por `pipeline.eventos`.
 """
@@ -191,9 +198,10 @@ class Taxonomia:
 
     dominio: str
     version: int
-    #: id -> {"label": str, "desc": str, "sinonimos": tuple}, EN EL ORDEN DEL YAML (el prompt lo
-    #: respeta). `sinonimos` son las superficies con que la prosa nombra a LA CLASE, no a una
-    #: entidad (ver `nombres_de_tipo`).
+    #: id -> {"label": str, "desc": str, "sinonimos": tuple, "ontologia": str}, EN EL ORDEN DEL
+    #: YAML (el prompt lo respeta). `sinonimos` son las superficies con que la prosa nombra a LA
+    #: CLASE, no a una entidad (ver `nombres_de_tipo`); `ontologia` es el nombre de la taxonomia
+    #: externa a la que ESE tipo se mapea, o "" (ver `tipos_con_ontologia`).
     tipos: dict = field(default_factory=dict)
     #: id -> Relacion, en el orden del YAML.
     relaciones: dict = field(default_factory=dict)
@@ -241,6 +249,56 @@ class Taxonomia:
     def labels(self) -> tuple:
         return tuple(e["label"] for e in self.tipos.values())
 
+    def tipo_de_label(self, label: str) -> str | None:
+        """El inverso de `label_de`: el id del tipo que escribe ese label, o None.
+
+        POR QUE EXISTE (19-sep-2026, `docs/DISENO-labels-del-perfil-19sep.md`). El retrieval
+        razona en LABELS —`buscar_en: "Patologia"` es lo que el analizador emite y lo que viaja
+        en el `WHERE` del Cypher— y el perfil razona en TIPOS. Sin este inverso, todo el que
+        recibe un label tiene que llevar su propio mapa al lado, que es exactamente las
+        dieciseis copias que esta tanda vino a borrar.
+
+        **None y no una excepcion**, igual que `label_de`: un label que el perfil no declara
+        existe de verdad en el grafo (`CategoriaATC`, `Chunk`, `Tema`) y preguntar por el es
+        legitimo. Quien necesite que falle, que compare contra None.
+        """
+        for tid, entrada in self.tipos.items():
+            if entrada["label"] == label:
+                return tid
+        return None
+
+    def desc_de(self, tipo: str) -> str:
+        """La descripcion de un tipo, o "" si no lo declara. Es la tercera pata de la tripleta
+        `(id, label, desc)` con que el prompt del analizador publica su vocabulario: sin ella,
+        una linea derivada del perfil diria menos que la que estaba escrita a mano."""
+        entrada = self.tipos.get(tipo)
+        return entrada["desc"] if entrada else ""
+
+    def sinonimos_de(self, tipo: str) -> tuple:
+        """Las superficies con que la prosa nombra a ESTA clase, TAL COMO LAS DECLARA EL PERFIL.
+
+        SIN PLEGAR, y esa es toda la diferencia con `nombres_de_tipo`: aquella pliega acentos y
+        puntuacion porque COMPARA, y estas son claves de un diccionario que se consulta con lo
+        que el modelo devolvio (`api/services/analyzer._TYPE_NORMALIZE`). Plegarlas ahi juntaria
+        "grupo farmacologico" y "grupo farmacológico" en una sola clave, que hoy son dos con
+        destinos distintos.
+        """
+        entrada = self.tipos.get(tipo)
+        return tuple(entrada["sinonimos"]) if entrada else ()
+
+    def tipos_con_ontologia(self, cual: str | None = None) -> tuple:
+        """Los tipos que declaran `ontologia`, en el orden del YAML. Con `cual`, solo los de esa.
+
+        POR QUE ESTA EN EL PERFIL Y NO EN EL CODIGO (19-sep-2026). "Farmaco sube a ATC;
+        Patologia, EstructuraAnatomica y Procedimiento suben a SNOMED" estaba escrito a mano en
+        CUATRO lugares del retrieval (`api/routers/ontology_router.py`, `api/services/layers.py`
+        y dos veces en `ontology.py`). No es una decision del codigo: es del dominio, igual que
+        los `from`/`to`. Un perfil que no la declare en ningun tipo devuelve vacio, que es
+        exactamente lo que le pasa hoy a `derecho` y a `generico`.
+        """
+        return tuple(tid for tid, e in self.tipos.items()
+                     if e["ontologia"] and (cual is None or e["ontologia"] == cual))
+
     @cached_property
     def nombres_de_tipo(self) -> frozenset:
         """TODAS las formas de nombrar una CLASE del vocabulario, plegadas para comparar: el id
@@ -276,7 +334,8 @@ def taxonomia(perfil: dict, *, ruta=None, plantilla: str | None = None) -> Taxon
     for entrada in perfil.get("entities") or []:
         tipos[entrada["id"]] = {"label": entrada.get("label") or entrada["id"],
                                 "desc": entrada.get("desc") or "",
-                                "sinonimos": tuple(entrada.get("sinonimos") or ())}
+                                "sinonimos": tuple(entrada.get("sinonimos") or ()),
+                                "ontologia": (entrada.get("ontologia") or "").strip()}
 
     relaciones = {}
     for entrada in perfil.get("relations") or []:
@@ -348,6 +407,15 @@ def _validar(tx: Taxonomia) -> None:
             raise ValueError(
                 f"perfil '{tx.dominio}': el id de entidad {tipo!r} no matchea ^[a-z][a-z0-9_]*$ "
                 "(los ids viajan en el prompt y vuelven en el JSON del modelo)")
+    # `ontologia` (19-sep-2026) nombra una taxonomia externa y el codigo la compara por igualdad
+    # (`tipos_con_ontologia("atc")`), asi que un "ATC " con mayusculas o un espacio de mas serian
+    # un subconjunto vacio y un retrieval mudo. Misma forma que un id de entidad.
+    for tid, entrada in tx.tipos.items():
+        ontologia = entrada["ontologia"]
+        if ontologia and not _ID_ENTIDAD.match(ontologia):
+            raise ValueError(
+                f"perfil '{tx.dominio}': {tid}.ontologia {ontologia!r} no matchea "
+                "^[a-z][a-z0-9_]*$ (se compara por igualdad, no por parecido)")
     labels = [e["label"] for e in tx.tipos.values()]
     if len(set(labels)) != len(labels):
         repetidos = sorted({x for x in labels if labels.count(x) > 1})

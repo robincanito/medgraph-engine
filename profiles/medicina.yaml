@@ -1,6 +1,30 @@
 # Perfil de dominio: bibliografía médica (MedGraph)
 # Fuente: taxonomía en producción de extract_entities.py (2026-07, 159K+ entidades)
 #
+# VERSION 4 (19-sep-2026, `medgraph/docs/DISENO-labels-del-perfil-19sep.md`). **Un solo campo
+# nuevo, `entities[].ontologia`, y CERO cambios en lo que se le pide al modelo**: el prompt
+# renderizado de v4 es byte a byte el de v3 (lo fija el golden
+# `medgraph/tests/golden/extraccion/medicina__prompt.txt`, que no se movió en esta tanda). El bump
+# es porque `version` viaja en el linaje y el vocabulario publicado cambió de forma, no porque la
+# cosecha deje de ser comparable: `medicina@3` y `medicina@4` extraen exactamente lo mismo.
+#
+# QUE DECLARA `ontologia`, y por qué es del DOMINIO y no del código. "Los fármacos suben a ATC;
+# las patologías, las estructuras anatómicas y los procedimientos suben a SNOMED" estaba escrito a
+# mano en CUATRO lugares del retrieval de MedGraph (`api/routers/ontology_router.py`,
+# `api/services/layers.py`, y dos veces en `ontology.py`: el mapeo con LLM y el reporte de
+# cobertura). Eso no es una decisión del código: es la misma clase de dato que los `from`/`to`.
+# Desde hoy lo declara el tipo y el código lo lee con `Taxonomia.tipos_con_ontologia(cual)`.
+# Es OPCIONAL y aditivo: un perfil que no lo declare en ningún tipo devuelve un subconjunto
+# vacío, que es exactamente lo que hoy les pasa a `derecho@1` y a `generico@1` — ninguno de los
+# dos tiene ontología externa y ninguno cambia una coma.
+#
+# Y CORRIGE UNA FRASE DE v3, que era verdad el 18 y dejó de serlo el 19: abajo dice que el label
+# `MoleculaBiologica` "todavía NO lo consulta nadie" y que schema.py, comprehensive.py, analyzer.py
+# y dedup_entities.py "nombran sus labels a mano". Esos ocho lugares pasaron a derivarlos de estas
+# `entities`, así que el tipo doce —y el trece que venga— entra solo en el retrieval. Lo que sigue
+# siendo cierto es que no hay un solo nodo `:MoleculaBiologica` en el grafo mientras no se
+# re-extraiga.
+#
 # VERSION 3 (18-sep-2026, `medgraph/docs/DISENO-curar-extractor-18sep.md`). El juez-LLM midió la
 # extracción contra seis controles positivos firmados (`docs/E-juez-linea-de-base-14sep.md`,
 # gemini-2.5-pro): reales 3,63/5 y **`j3_relacion` 2,08**. El eje débil no era la entidad: era la
@@ -42,7 +66,7 @@
 # solo nodo con ese label, así que no hay nada perdido; ENGANCHARLO ES PRE-REQUISITO de la
 # decisión de re-extraer.
 profile: medicina
-version: 3
+version: 4
 language: es
 
 graph:
@@ -54,23 +78,35 @@ graph:
 # nombre que es la clase no es una entidad, ni como entidad ni como extremo de una relación. El id
 # y el `label` se agregan solos, con y sin guiones bajos, y la comparación pliega acentos (es una
 # comparación, no un nombre canónico: `fold_accents` sigue en false para lo que se escribe).
+#
+# `ontologia` (19-sep-2026) declara a qué taxonomía EXTERNA sube este tipo por `ES_UN`. Los cuatro
+# valores de abajo son los que el retrieval ya usaba escritos a mano: `atc` para el fármaco
+# (`(:Farmaco)-[:ES_UN*1..5]->(:CategoriaATC)`) y `snomed` para la patología, la estructura
+# anatómica y el procedimiento (`-[:ES_UN*1..3]->(:CategoriaSNOMED)`). Los ocho tipos restantes NO
+# tienen mapeo y por eso no declaran la clave: `hallazgo`, `parametro` y compañía suben a SNOMED
+# en `api/services/layers.py` sólo si alguien se los mapeó, y nadie lo hizo. El campo dice lo que
+# el mapeador SABE hacer, no lo que sería lindo tener.
 entities:
   - id: patologia
     label: Patologia
     desc: "enfermedades y condiciones: otitis media, neumonía, diabetes, HTA, psoriasis"
     sinonimos: [enfermedad, enfermedades, cuadro clínico, condición clínica]
+    ontologia: snomed
   - id: estructura_anatomica
     label: EstructuraAnatomica
     desc: "estructuras: oído medio, membrana timpánica, retina, riñón, hígado"
     sinonimos: [estructura anatómica, estructuras anatómicas, órgano, órganos]
+    ontologia: snomed
   - id: procedimiento
     label: Procedimiento
     desc: "técnicas y procedimientos: otoscopía, ECG, intubación, toma de TA"
     sinonimos: [procedimientos, técnica, técnicas, intervención]
+    ontologia: snomed
   - id: farmaco
     label: Farmaco
     desc: "fármacos específicos: furosemida, amoxicilina, ibuprofeno, metformina"
     sinonimos: [fármaco, fármacos, medicamento, medicamentos, droga, drogas]
+    ontologia: atc
   - id: grupo_farmacologico
     label: GrupoFarmacologico
     desc: "clases de fármacos: diuréticos, betalactámicos, AINEs, corticoides"
