@@ -69,7 +69,11 @@ profile: medicina
 # v5 (20-sep-2026; `medgraph/docs/DISENO-relaciones-20sep.md`): cada relacion trae su `evidencia`
 # y las causales declaran su polaridad (`afirma`/`niega`); ejemplos del mismo tipo donde faltaban;
 # `extraction.evidencia_relaciones: true`. El corpus no se re-chunkea: solo cambia la extraccion.
-version: 5
+# v6 (20-sep-2026, noche; §6 del mismo diseño): los huecos de `from_to` que la muestra juzgada
+# mostro como huecos DEL PERFIL (ASOCIADA_A sin grupo_farmacologico ni estructura_anatomica;
+# CAUSADA_POR sin procedimiento). El validador ademas descarta el extremo repetido y la evidencia
+# que cruza el punto. Sin cambios de prompt salvo esas listas de tipos.
+version: 6
 language: es
 
 graph:
@@ -174,8 +178,9 @@ relations:
     from: [patologia, signo, sintoma, hallazgo]
     # parametro validado: "trastornos tromboticos CAUSADA_POR factor v de leiden" (567 casos)
     # hallazgo validado: "paro cardiaco CAUSADA_POR muerte encefalica" (540)
+    # procedimiento (v6, 20-sep): "inmunodepresion CAUSADA_POR quimioterapia" caia en from_to.
     to: [agente, patologia, farmaco, parametro, hallazgo, estructura_anatomica,
-         molecula_biologica]
+         molecula_biologica, procedimiento]
     ejemplo: 'la otitis media aguda CAUSADA_POR streptococcus pneumoniae — la CAUSA va en
       "hasta"; "el agente CAUSADA_POR la enfermedad" esta al reves. Entre dos patologias la
       causa tambien va en "hasta": "la cirrosis CAUSADA_POR la hepatitis c"'
@@ -251,10 +256,15 @@ relations:
     to: [patologia]
     ejemplo: 'la neumonia DIFERENCIAL_DE la insuficiencia cardiaca — las dos son patologias'
   - id: ASOCIADA_A            # laxa a propósito: asociación inespecífica
-    from: [patologia, signo, sintoma, hallazgo, parametro, farmaco, procedimiento,
-           molecula_biologica]
-    to: [patologia, signo, sintoma, hallazgo, parametro, farmaco, procedimiento,
-         molecula_biologica]
+    # grupo_farmacologico y estructura_anatomica (v6, 20-sep): el propio ejemplo dice que es la
+    # relacion para "el farmaco actua sobre la enzima", y 8 de las 20 from_to de la muestra @5 eran
+    # `grupo_farmacologico -> molecula_biologica | parametro` (los azoles y la 14-alfa-esterol
+    # desmetilasa, los IECA y la poscarga); `farmaco ASOCIADA_A estructura_anatomica` eran 3.125
+    # en el corpus el 18-sep ("la regla es mas sospechosa que el dato").
+    from: [patologia, signo, sintoma, hallazgo, parametro, farmaco, grupo_farmacologico,
+           procedimiento, molecula_biologica, estructura_anatomica]
+    to: [patologia, signo, sintoma, hallazgo, parametro, farmaco, grupo_farmacologico,
+         procedimiento, molecula_biologica, estructura_anatomica]
     ejemplo: 'la obesidad ASOCIADA_A la apnea del sueño — asociacion inespecifica, sin direccion
       causal; es la relacion para "el farmaco actua sobre la enzima"'
   - id: FACTOR_DE_RIESGO

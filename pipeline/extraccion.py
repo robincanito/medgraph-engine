@@ -145,6 +145,11 @@ MIN_TOKEN_SUFIJO, MAX_DIF_SUFIJO = 4, 3
 #: que no esta literal en el fragmento (el modelo la copio con un tropiezo) se acepta si tiene al
 #: menos MIN_PALABRAS_EVIDENCIA palabras y UMBRAL_EVIDENCIA de ellas estan en el fragmento.
 MAX_EVIDENCIA, MIN_PALABRAS_EVIDENCIA, UMBRAL_EVIDENCIA = 240, 3, 0.85
+#: Fin de oracion DENTRO de la evidencia cruda (v6, 20-sep): punto/cierre, espacio y mayuscula. Un
+#: tramo que termina una oracion y empieza otra no afirma la relacion de una sola vez: es la
+#: "inferencia por proximidad" que el juez siguio objetando sobre `medicina@5` ("AINE PUEDE_PRODUCIR
+#: trastorno hemorragico... solo los menciona en proximidad"). "S. aureus" no matchea (minuscula).
+_RX_FIN_DE_ORACION = re.compile(r"[.!?]\s+[A-ZÁÉÍÓÚÑ¿¡]")
 
 _ID_ENTIDAD = re.compile(r"^[a-z][a-z0-9_]*$")
 _ID_RELACION = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -669,6 +674,8 @@ def _motivo_evidencia_relacion(evidencia, desde: str, hasta: str, sinonimos_de: 
         dice: es lo que el juez objeto 28 veces sobre `medicina@4`.
       · `evidencia_larga`: mas de MAX_EVIDENCIA caracteres plegados. Ya no es "el tramo que la
         afirma" sino el fragmento, que nombra a los dos extremos trivialmente.
+      · `evidencia_dos_oraciones` (v6): el tramo cruza un fin de oracion. Dos entidades en dos
+        oraciones vecinas son proximidad, no afirmacion.
       · `evidencia_ajena`: no esta en el fragmento (`_tramo_del_fragmento`).
       · `evidencia_incompleta`: no nombra a los dos extremos (con sus sinonimos, como la regla de
         evidencia de las entidades). Un extremo de otro fragmento no tiene sinonimos aca y se
@@ -683,6 +690,8 @@ def _motivo_evidencia_relacion(evidencia, desde: str, hasta: str, sinonimos_de: 
         return "sin_evidencia_relacion"
     if len(ev) > MAX_EVIDENCIA:
         return "evidencia_larga"
+    if _RX_FIN_DE_ORACION.search(str(evidencia).strip()):
+        return "evidencia_dos_oraciones"
     if not _tramo_del_fragmento(ev, fragmento, tokens):
         return "evidencia_ajena"
     ev_tokens = ev.split()
@@ -815,6 +824,10 @@ def validar(tx: Taxonomia, crudo: dict, chunk: dict, *,
             continue
         if rid not in tx.relaciones:
             _descartar(descartes, libro_id, chunk_id, "tipo_relacion", relacion=rid)
+            continue
+        if desde == hasta:
+            # "tp SE_DIAGNOSTICA_CON tp" (v6, 20-sep): una arista de un nodo a si mismo no dice nada.
+            _descartar(descartes, libro_id, chunk_id, "extremos_iguales", relacion=rid)
             continue
         de_tipo = [x for x in (desde, hasta) if _plegar(x) in tx.nombres_de_tipo]
         if de_tipo:
