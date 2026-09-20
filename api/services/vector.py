@@ -394,13 +394,6 @@ RETURN b.id AS id
 ORDER BY b.id
 """
 
-CYPHER_PADRES = """
-MATCH (p:ParentChunk) WHERE p.id IN $ids
-RETURN p.id AS id, p.text AS texto, p.page_start AS pag_inicio, p.page_end AS pag_fin,
-       p.word_count AS palabras, p.titulo_capitulo AS capitulo, p.titulo_seccion AS seccion
-"""
-
-
 def cupo_por_defecto(top_k: int) -> int:
     """La mitad del `top_k`, minimo 1. Es el mismo numero que usa el cupo implicito de la capa de
     bibliografia para las fuentes que sugiere el router; se nombra para que la garantia explicita
@@ -449,9 +442,29 @@ def agrupar_resultados(items: list, modo: str | None) -> list:
     8-gramas, ninguno >= 50 %). O sea que no son duplicados: son pasajes distintos de un mismo
     pasaje largo. Quedarse con el primero de cada pagina TIRA material real; agrupar no tira nada.
 
-    Cada representante lleva `unidades` (los hijos que lo trajeron, con su score y su pagina) y
-    `agrupado_por`. El texto del padre lo pone `texto_de_padres`, DESPUES de cortar el `top_k`: es
-    una consulta por lote y no tiene sentido pagarla por candidatos que se descartan.
+    EL TEXTO NO SE REEMPLAZA POR EL DEL PADRE, y conviene saber por que antes de "mejorarlo". Se
+    hacia hasta el 20-sep-2026 --habia un `texto_de_padres` que traia la ventana entera-- con una
+    intencion razonable: dar el pasaje largo en vez de un recorte suelto. Lo tumbo la medicion
+    sobre una instancia real, con 87.222 chunks con padre:
+
+        padre 4.714 caracteres de mediana  ·  hijo 1.829  ·  tope de entrega 1.100
+
+        del hijo llegaban 372 caracteres de media, y en el **62,8 %** de los casos no llegaba
+        NADA del pasaje que matcheo
+
+    La causa es que el texto se recorta AGUAS ABAJO y siempre DESDE EL PRINCIPIO: si la ventana
+    mide cuatro veces el tope, sus primeros 1.100 caracteres casi nunca contienen al hijo. Lo que
+    se entregaba era texto vecino de la misma ventana: mismo tema, misma pagina, y no lo que se
+    busco. Es el peor modo de falla de un buscador, porque no se ve.
+
+    Anclar la ventana en el hijo en vez de tomarla desde el principio se evaluo y se descarto con
+    el numero: solo el 8,7 % de los hijos es mas corto que el tope, asi que anclar agregaba 22
+    caracteres de contexto en el 5,8 % de los casos. Identico a no reemplazar, con codigo de mas.
+
+    Lo que agrupar SI hace, y es lo que vale: DEDUPLICAR Y LIBERAR LUGARES. Cinco pasajes de la
+    misma ventana ocupan uno y los otros cuatro se llenan con material distinto. Cada
+    representante lleva `unidades` (los hijos que lo trajeron, con su score y su pagina) para que
+    la cita siga siendo exacta.
     """
     if modo not in MODOS_AGRUPACION:
         return [dict(r) for r in items]
@@ -474,38 +487,6 @@ def agrupar_resultados(items: list, modo: str | None) -> list:
                                       "pag_inicio": h.get("pag_inicio")} for h in hijos]
         salida.append(representante)
     return sorted(salida, key=lambda x: x.get("rrf_score") or 0, reverse=True)
-
-
-def texto_de_padres(items: list) -> list:
-    """Reemplaza el texto del chunk por el del `:ParentChunk` en los grupos de `agrupar="padre"`.
-
-    UNA consulta por lote para todo el `top_k`. La ventana del padre ya esta en el grafo y no
-    cuesta nada: es la diferencia entre darle a quien redacta cinco recortes de una pagina y darle
-    la pagina.
-
-    SI EL PADRE NO EXISTE SE DEJA EL CHUNK, sin avisar por resultado: los `:ParentChunk` los crea
-    la carga (`pipeline/carga.py`), pero un corpus cargado por otro camino puede no tenerlos, y un
-    pasaje real vale mas que la coherencia de la agrupacion.
-    """
-    ids = sorted({r["parent_id"] for r in items
-                  if r.get("agrupado_por") == "padre" and r.get("parent_id")})
-    if not ids:
-        return items
-    padres = {f["id"]: f for f in query(CYPHER_PADRES, {"ids": ids})}
-    for r in items:
-        if r.get("agrupado_por") != "padre":
-            continue
-        p = padres.get(r.get("parent_id"))
-        if not p or not (p.get("texto") or "").strip():
-            continue
-        r["texto"] = p["texto"]
-        r["palabras"] = p.get("palabras") or r.get("palabras")
-        r["pag_inicio"] = p.get("pag_inicio") if p.get("pag_inicio") is not None else r.get("pag_inicio")
-        r["pag_fin"] = p.get("pag_fin") if p.get("pag_fin") is not None else r.get("pag_fin")
-        r["capitulo"] = p.get("capitulo") or r.get("capitulo")
-        r["seccion"] = p.get("seccion") or r.get("seccion")
-        r["padre_id"] = p["id"]
-    return items
 
 
 def fusionar_con_cupo(general: list, garantizados: list, top_k: int, cupo: int | None = None,
@@ -858,15 +839,6 @@ def search_hybrid(query_text: str, top_k: int = 8, libro_id: str = None,
     results = fusionar_con_cupo(candidatos, candidatos_g, top_k, cupo,
                                 clave=lambda r: clave_de_agrupacion(r, agrupar),
                                 max_por_fuente=max_por_fuente)
-
-    if agrupar == "padre":
-        try:
-            texto_de_padres(results)
-        except Exception as e:
-            # El texto del padre es una mejora, no el resultado: si esa consulta se cae, los chunks
-            # que ya se recuperaron valen. Se dice como degradacion parcial y no se pierde nada.
-            logging.error(f"No se pudo traer el texto de los padres: {type(e).__name__}")
-            fallas.append(_falla("padres", e))
 
     # EL POOL ES LA UNION DE LO QUE SE MIRO: la pasada general mas la garantizada. Se cuenta sobre
     # las unidades crudas y no sobre los grupos, porque "cuantos pasajes de esta fuente entraron al
