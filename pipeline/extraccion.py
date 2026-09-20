@@ -139,6 +139,12 @@ MOTIVOS = ("tipo_entidad", "tipo_relacion", "nombre_corto", "nombre_largo", "fro
 #: (8 caracteres de diferencia). Las palabras de menos de 4 caracteres exigen igualdad: con tres
 #: letras, "salvo el sufijo" no dice nada.
 MIN_TOKEN_SUFIJO, MAX_DIF_SUFIJO = 4, 3
+#: LA EVIDENCIA DE LA RELACION (20-sep-2026, `docs/DISENO-relaciones-20sep.md`). El prompt pide
+#: un tramo de hasta 160 caracteres; plegado y con margen, mas de 240 ya no es "el tramo que la
+#: afirma" sino el fragmento entero, que nombra a los dos extremos trivialmente. Y la evidencia
+#: que no esta literal en el fragmento (el modelo la copio con un tropiezo) se acepta si tiene al
+#: menos MIN_PALABRAS_EVIDENCIA palabras y UMBRAL_EVIDENCIA de ellas estan en el fragmento.
+MAX_EVIDENCIA, MIN_PALABRAS_EVIDENCIA, UMBRAL_EVIDENCIA = 240, 3, 0.85
 
 _ID_ENTIDAD = re.compile(r"^[a-z][a-z0-9_]*$")
 _ID_RELACION = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -170,6 +176,30 @@ class Relacion:
     #: el modelo lo produzca. Vacio = la relacion no lo declara (las cuatro huerfanas no lo
     #: declaran: lo que no se pide no se ejemplifica).
     ejemplo: str = ""
+    #: POLARIDAD (20-sep-2026, `docs/DISENO-relaciones-20sep.md` §1.3): raices de los verbos que
+    #: AFIRMAN esta relacion y de los que la NIEGAN ("previene" niega PUEDE_PRODUCIR), tal como el
+    #: perfil las escribe (`relations[].afirma` / `.niega`); viajan al prompt y las lee
+    #: `negada_en`. Vacias = la relacion no declara polaridad y la regla no rige (derecho,
+    #: generico, y las relaciones no causales de medicina).
+    afirma: tuple = ()
+    niega: tuple = ()
+
+    def negada_en(self, evidencia: str) -> bool:
+        """True si la evidencia (ya plegada) trae un verbo que NIEGA la relacion y, tachado ese
+        tramo, ninguno que la afirme. "no causa X" niega aunque contenga "causa": lo negado se
+        tacha ANTES de buscar la afirmacion. Con las dos cosas ("previene X pero causa Y") no se
+        decide y pasa: la direccion y el sentido los juzga el juez, no una heuristica. Sin
+        lexicon devuelve False: no se adivina.
+        """
+        if not self.niega or not evidencia:
+            return False
+        tachada, hubo = evidencia, False
+        for raiz in self.niega:
+            nueva = re.sub(r"\b" + re.escape(_plegar(raiz)), " ", tachada)
+            hubo, tachada = hubo or nueva != tachada, nueva
+        if not hubo:
+            return False
+        return not any(re.search(r"\b" + re.escape(_plegar(raiz)), tachada) for raiz in self.afirma)
 
     def acepta(self, desde_tipo: str, hasta_tipo: str) -> bool:
         """Si este par de tipos cumple los `from`/`to`. Un extremo sin declarar acepta todo."""
@@ -217,6 +247,10 @@ class Taxonomia:
     fundir_sinonimos: bool = True
     plegar_acentos: bool = False
     max_menciones: int = MAX_MENCIONES
+    #: `extraction.evidencia_relaciones` (20-sep-2026): el validador EXIGE y LEE la `evidencia` de
+    #: cada relacion (`_motivo_evidencia_relacion`). False = la clave, si viene, se ignora y se
+    #: quita (derecho y generico no la declaran; sus goldens no se mueven).
+    evidencia_relaciones: bool = False
 
     # ── lecturas ──────────────────────────────────────────────────────────────────────
     @property
@@ -345,6 +379,10 @@ def taxonomia(perfil: dict, *, ruta=None, plantilla: str | None = None) -> Taxon
             hasta=frozenset(entrada.get("to") or []),
             extraer=entrada.get("extraer", True) is not False,
             ejemplo=(entrada.get("ejemplo") or "").strip(),
+            afirma=tuple(str(x).strip().lower() for x in (entrada.get("afirma") or ())
+                         if str(x).strip()),
+            niega=tuple(str(x).strip().lower() for x in (entrada.get("niega") or ())
+                        if str(x).strip()),
         )
 
     extraccion = perfil.get("extraction") or {}
@@ -368,6 +406,7 @@ def taxonomia(perfil: dict, *, ruta=None, plantilla: str | None = None) -> Taxon
         fundir_sinonimos=canon.get("merge_synonyms", True) is not False,
         plegar_acentos=canon.get("fold_accents", False) is True,
         max_menciones=int(canon.get("max_menciones") or MAX_MENCIONES),
+        evidencia_relaciones=extraccion.get("evidencia_relaciones", False) is True,
     )
     _validar(tx)
     return tx
@@ -528,7 +567,14 @@ def _linea_relacion(r: Relacion) -> str:
     """
     linea = (f"- {r.id}: {' | '.join(sorted(r.desde)) or 'cualquiera'} -> "
              f"{' | '.join(sorted(r.hasta)) or 'cualquiera'}")
-    return f"{linea}\n    ej: {r.ejemplo}" if r.ejemplo else linea
+    if r.ejemplo:
+        linea += f"\n    ej: {r.ejemplo}"
+    # La polaridad (20-sep-2026), en las palabras del perfil: es la mitad-prompt de `polaridad`.
+    if r.afirma:
+        linea += f"\n    afirma: {', '.join(r.afirma)}"
+    if r.niega:
+        linea += f"\n    niega: {', '.join(r.niega)}"
+    return linea
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════
@@ -614,6 +660,53 @@ def con_evidencia(nombre: str, sinonimos, fragmento: str, tokens: list) -> bool:
     return any(_aparece(_plegar(s), fragmento, tokens) for s in sinonimos or ())
 
 
+def _motivo_evidencia_relacion(evidencia, desde: str, hasta: str, sinonimos_de: dict,
+                               fragmento: str, tokens: list, regla: Relacion) -> str | None:
+    """LA REGLA DE EVIDENCIA DE LA RELACION (20-sep-2026, `docs/DISENO-relaciones-20sep.md` §1).
+    El motivo del descarte, o None si la relacion pasa. Cuatro chequeos, en este orden:
+
+      · `sin_evidencia_relacion`: no vino, o vino vacia. El modelo la sabia pero el texto no la
+        dice: es lo que el juez objeto 28 veces sobre `medicina@4`.
+      · `evidencia_larga`: mas de MAX_EVIDENCIA caracteres plegados. Ya no es "el tramo que la
+        afirma" sino el fragmento, que nombra a los dos extremos trivialmente.
+      · `evidencia_ajena`: no esta en el fragmento (`_tramo_del_fragmento`).
+      · `evidencia_incompleta`: no nombra a los dos extremos (con sus sinonimos, como la regla de
+        evidencia de las entidades). Un extremo de otro fragmento no tiene sinonimos aca y se
+        busca por su nombre.
+      · `polaridad`: el verbo la niega (`Relacion.negada_en`). Solo con lexicon.
+
+    Lo que NO hace: adivinar la direccion entre tipos iguales. Si la evidencia nombra a los dos
+    extremos, pasa; la direccion la juzga el juez.
+    """
+    ev = _plegar(evidencia or "")
+    if not ev:
+        return "sin_evidencia_relacion"
+    if len(ev) > MAX_EVIDENCIA:
+        return "evidencia_larga"
+    if not _tramo_del_fragmento(ev, fragmento, tokens):
+        return "evidencia_ajena"
+    ev_tokens = ev.split()
+    for extremo in (desde, hasta):
+        if not con_evidencia(_plegar(extremo), sinonimos_de.get(extremo, ()), ev, ev_tokens):
+            return "evidencia_incompleta"
+    if regla.negada_en(ev):
+        return "polaridad"
+    return None
+
+
+def _tramo_del_fragmento(ev: str, fragmento: str, tokens: list) -> bool:
+    """La evidencia (plegada) esta en el fragmento (plegado): literal, o —si el modelo la copio
+    con un tropiezo de puntuacion o una palabra— con al menos UMBRAL_EVIDENCIA de sus palabras
+    presentes en el fragmento y no menos de MIN_PALABRAS_EVIDENCIA palabras."""
+    if ev in fragmento:
+        return True
+    partes = ev.split()
+    if len(partes) < MIN_PALABRAS_EVIDENCIA:
+        return False
+    presentes = set(tokens)
+    return sum(1 for p in partes if p in presentes) / len(partes) >= UMBRAL_EVIDENCIA
+
+
 def _descartar(descartes, libro_id, chunk_id, motivo: str, **campos) -> None:
     fila = {"motivo": motivo, "chunk_id": chunk_id, **campos}
     if descartes is not None:
@@ -659,6 +752,16 @@ def validar(tx: Taxonomia, crudo: dict, chunk: dict, *,
     otro fragmento y la relacion entra al grafo. Descartarla aca perderia aristas reales. Se
     cuenta (`motivo="extremo_ausente"`) y se deja pasar.
 
+    LA EVIDENCIA DE LA RELACION (20-sep-2026, `docs/DISENO-relaciones-20sep.md`): si el perfil
+    declara `extraction.evidencia_relaciones`, cada relacion tiene que traer `evidencia` —el tramo
+    del fragmento que la afirma— y se verifica en cuatro pasos (`_motivo_evidencia_relacion`):
+    que exista, que este en el fragmento, que nombre a los dos extremos, que el verbo no la
+    niegue. La evidencia VERIFICADA viaja en el artefacto (`extraction/v1` la declara opcional
+    desde el 20-sep): es el linaje de la arista y lo que permite pasar lo guardado por un
+    validador mejor sin pagar una llamada; al grafo no llega, porque `canonicalizar`
+    reconstruye cada relacion con sus tres claves. Sin el flag la clave se ignora y se quita;
+    sin fragmento (un chunk sin texto) no se exige, igual que la evidencia de las entidades.
+
     LOS DESCARTES NO VIAJAN EN EL RESULTADO —solo su CONTEO de inferidas—, y tambien es a
     proposito: este dict se serializa tal cual en `extracted/{libro}_entities.json`, y
     `extraction/v1` declara sus items con `additionalProperties: false`. `inferidas_descartadas`
@@ -702,6 +805,7 @@ def validar(tx: Taxonomia, crudo: dict, chunk: dict, *,
         nombres.add(nombre)
 
     tipo_de = {e["nombre"]: e["tipo"] for e in entidades}
+    sinonimos_de = {e["nombre"]: e["sinonimos"] for e in entidades}
     relaciones = []
     for cruda in crudo.get("relaciones") or []:
         desde = normalizar_nombre(cruda.get("desde", ""), tx)
@@ -735,7 +839,23 @@ def validar(tx: Taxonomia, crudo: dict, chunk: dict, *,
                        desde_tipo=desde_tipo, hasta_tipo=hasta_tipo)
             if rechazo_from_to:
                 continue
-        relaciones.append({"desde": desde, "relacion": rid, "hasta": hasta})
+        # Sin fragmento no hay contra que verificar, y la regla de las entidades ya hace lo mismo:
+        # no se castiga al modelo por lo que no se le mando.
+        if tx.evidencia_relaciones and fragmento:
+            motivo = _motivo_evidencia_relacion(cruda.get("evidencia"), desde, hasta, sinonimos_de,
+                                                fragmento, tokens, regla)
+            if motivo:
+                _descartar(descartes, libro_id, chunk_id, motivo, relacion=rid,
+                           desde_tipo=desde_tipo, hasta_tipo=hasta_tipo)
+                continue
+        fila = {"desde": desde, "relacion": rid, "hasta": hasta}
+        if tx.evidencia_relaciones and cruda.get("evidencia"):
+            # La evidencia VERIFICADA viaja en el artefacto: es el linaje de la arista y lo que
+            # permite revalidar lo guardado con un lexicon mejor sin pagar una llamada (la
+            # leccion del 18-sep). Al grafo no llega: `canonicalizar` reconstruye la relacion
+            # con sus tres claves. Sin el flag, la clave se queda aca.
+            fila["evidencia"] = str(cruda["evidencia"]).strip()
+        relaciones.append(fila)
 
     salida = {"entidades": entidades, "relaciones": relaciones,
               "chunk_id": chunk_id, "libro_id": libro_id}

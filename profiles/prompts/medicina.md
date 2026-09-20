@@ -6,7 +6,7 @@ REGLAS:
 TIPOS DE ENTIDAD (id: que abarca):
 {entities_desc}
 
-TIPOS DE RELACION (id: tipos validos en "desde" -> tipos validos en "hasta", con un ejemplo que fija la direccion):
+TIPOS DE RELACION (id: tipos validos en "desde" -> tipos validos en "hasta", con un ejemplo que fija la direccion y, donde corresponde, los verbos que la AFIRMAN y los que la NIEGAN):
 {relations_desc}
 
 UNA MOLECULA DEL ORGANISMO NO ES UN FARMACO NI UN PROCEDIMIENTO:
@@ -16,4 +16,4 @@ UNA MOLECULA DEL ORGANISMO NO ES UN FARMACO NI UN PROCEDIMIENTO:
 {fragments}
 
 Responde SOLO con JSON valido. El JSON debe tener un array "resultados" con {n} elementos, uno por fragmento, en orden:
-{"resultados": [{"chunk_index": 0, "entidades": [{"nombre": "...", "tipo": "...", "sinonimos": ["..."]}], "relaciones": [{"desde": "...", "relacion": "...", "hasta": "..."}]}, ...]}
+{"resultados": [{"chunk_index": 0, "entidades": [{"nombre": "...", "tipo": "...", "sinonimos": ["..."]}], "relaciones": [{"desde": "...", "relacion": "...", "hasta": "...", "evidencia": "tramo copiado del fragmento que la afirma"}]}, ...]}

@@ -66,7 +66,10 @@
 # solo nodo con ese label, así que no hay nada perdido; ENGANCHARLO ES PRE-REQUISITO de la
 # decisión de re-extraer.
 profile: medicina
-version: 4
+# v5 (20-sep-2026; `medgraph/docs/DISENO-relaciones-20sep.md`): cada relacion trae su `evidencia`
+# y las causales declaran su polaridad (`afirma`/`niega`); ejemplos del mismo tipo donde faltaban;
+# `extraction.evidencia_relaciones: true`. El corpus no se re-chunkea: solo cambia la extraccion.
+version: 5
 language: es
 
 graph:
@@ -174,14 +177,29 @@ relations:
     to: [agente, patologia, farmaco, parametro, hallazgo, estructura_anatomica,
          molecula_biologica]
     ejemplo: 'la otitis media aguda CAUSADA_POR streptococcus pneumoniae — la CAUSA va en
-      "hasta"; "el agente CAUSADA_POR la enfermedad" esta al reves'
+      "hasta"; "el agente CAUSADA_POR la enfermedad" esta al reves. Entre dos patologias la
+      causa tambien va en "hasta": "la cirrosis CAUSADA_POR la hepatitis c"'
+    # POLARIDAD (v5): raices de los verbos que AFIRMAN la relacion y de los que la NIEGAN. El
+    # validador descarta la relacion cuya evidencia trae un verbo de `niega` y, tachado ese
+    # tramo, ninguno de `afirma` ("no causa" niega aunque contenga "causa"). Sin estas listas
+    # la regla no rige. Se comparan plegadas (sin acentos) y como prefijo de palabra.
+    afirma: [causa, causad, produc, provoc, debid, secundari, origin, desencaden, consecuencia,
+             induc, atribui, resulta de, por efecto de]
+    niega: [no causa, no produc, no provoc, previen, evita, proteg, reduc, disminuy, no se asocia,
+            independiente de, descarta, no es causa]
   - id: SE_MANIFIESTA_CON
     from: [patologia, signo, hallazgo]
     # parametro validado: "disfuncion primaria SE_MANIFIESTA_CON enzimas hepaticas" (2212)
     # patologia validado: "lesion neurologica SE_MANIFIESTA_CON coma irreversible" (11399)
     to: [signo, sintoma, hallazgo, parametro, patologia, estructura_anatomica,
          molecula_biologica]
-    ejemplo: 'la insuficiencia cardiaca SE_MANIFIESTA_CON disnea — la manifestacion va en "hasta"'
+    ejemplo: 'la insuficiencia cardiaca SE_MANIFIESTA_CON disnea — la manifestacion va en "hasta".
+      Entre dos patologias, la que forma parte del cuadro va en "hasta": "el lupus
+      SE_MANIFIESTA_CON nefritis"'
+    afirma: [manifest, se presenta, presenta, cursa, caracteriz, sintoma, signo, clinica, aparec,
+             se observa, hallazgo, acompañ, se asocia, frecuente]
+    niega: [no se manifiesta, no presenta, no cursa, asintomatic, ausencia de, no se observa,
+            no aparece, descarta]
   - id: SE_DIAGNOSTICA_CON
     # hallazgo validado como origen: "muerte encefalica SE_DIAGNOSTICA_CON protocolo" (383)
     from: [patologia, hallazgo]
@@ -194,6 +212,10 @@ relations:
     to: [farmaco, grupo_farmacologico, procedimiento]
     ejemplo: 'la otitis media aguda SE_TRATA_CON amoxicilina — el TRATAMIENTO va en "hasta"; un
       farmaco no "se trata con" una enfermedad ni con la molecula que inhibe (eso es ASOCIADA_A)'
+    afirma: [trat, terap, indic, administr, de eleccion, se emplea, se utiliza, se usa, util, eficaz,
+             mejor, alivia, respond, manejo, prescri, dosis]
+    niega: [contraindic, no se recomienda, no debe, evitar, no esta indicad, produc, caus, provoc,
+            induc, empeora, agrava, ineficaz, no es util, no tiene efecto, no mejora, sin efecto]
   - id: PARTE_DE
     from: [estructura_anatomica]
     to: [estructura_anatomica]
@@ -220,6 +242,10 @@ relations:
     to: [patologia, signo, sintoma, hallazgo]
     ejemplo: 'los AINE PUEDE_PRODUCIR hemorragia digestiva — quien produce va en "desde" y el
       efecto en "hasta"'
+    afirma: [produc, caus, provoc, induc, desencaden, gener, efecto adverso, efectos adversos,
+             reaccion adversa, toxic, riesgo de, asocia, da lugar, ocasion, favorec]
+    niega: [previen, evita, reduc, proteg, disminuy, trata, alivia, mejor, no produc, no caus,
+            revierte, corrige, no provoc, no induc, contrarresta]
   - id: DIFERENCIAL_DE
     from: [patologia]
     to: [patologia]
@@ -236,13 +262,22 @@ relations:
     to: [patologia]
     ejemplo: 'la hipertension FACTOR_DE_RIESGO el accidente cerebrovascular — el riesgo va en
       "desde" y la patologia en "hasta"'
+    afirma: [riesgo, predispon, favorec, aument, mas frecuente, mayor incidencia, se asocia, asociad,
+             factor, probabilidad, susceptib]
+    niega: [protector, proteg, reduc, disminuy, previen, no se asocia, no aumenta, menor riesgo,
+            no es factor]
   - id: COMPLICACION_DE
     # signo validado como origen: "palidez COMPLICACION_DE menometrorragia" (259)
     from: [patologia, hallazgo, signo]
     # farmaco validado: "hemorragia gastrointestinal COMPLICACION_DE salicilatos" (253)
     to: [patologia, procedimiento, farmaco, hallazgo, signo]
     ejemplo: 'la hemorragia digestiva COMPLICACION_DE los salicilatos — la COMPLICACION va en
-      "desde" y aquello de lo que es complicacion en "hasta"'
+      "desde" y aquello de lo que es complicacion en "hasta". Entre dos patologias igual: "la
+      neumonia COMPLICACION_DE la gripe" (la neumonia es la complicacion)'
+    afirma: [complic, secuela, consecuencia, evolucion, progres, desarroll, aparec, en el curso de,
+             tras, despues de, secundari, se asocia, puede producir]
+    niega: [previen, evita, no se complica, no produc, proteg, reduce el riesgo, no evoluciona,
+            descarta]
   - id: VARIANTE_DE
     from: [patologia]
     to: [patologia]
@@ -347,6 +382,10 @@ extraction:
   # Y ES TAMBIEN EL ALCANCE DE LA REGLA DE EVIDENCIA (18-sep-2026): el validador busca la entidad
   # en estos 2.500 caracteres y no en el chunk entero, porque es exactamente lo que el modelo vio.
   max_chars_fragmento: 2500
+  # v5 (20-sep-2026): cada relacion trae su `evidencia` y el validador la exige y la lee (que
+  # exista, que este en el fragmento, que nombre los dos extremos, que no la niegue el verbo).
+  # derecho y generico no lo declaran: para ellos la clave, si viene, se ignora y se quita.
+  evidencia_relaciones: true
   prompt_template: prompts/medicina.md
   # LAS CINCO PRIMERAS SON VERBATIM del bloque REGLAS de `extract_entities_fast.BATCH_PROMPT`
   # (v1), volcadas con un script. El valor de v1 del perfil era una PARAFRASIS escrita al crear
@@ -354,9 +393,11 @@ extraction:
   # pone `{rules}` seguido de un renglón en blanco, así que un salto de línea de más acá cambia
   # el prompt.
   #
-  # LAS TRES ULTIMAS SON DE v3 (18-sep-2026) y son la mitad-prompt de lo que el validador empezó
+  # LAS TRES SIGUIENTES SON DE v3 (18-sep-2026) y son la mitad-prompt de lo que el validador empezó
   # a rechazar el mismo día: evidencia textual, dirección de la relación y el destino que es una
-  # clase. Van acá y no en la plantilla porque son criterio del DOMINIO; la plantilla es la forma.
+  # clase. LAS DOS ULTIMAS SON DE v5 (20-sep-2026): la evidencia de cada relación y la dirección
+  # entre tipos iguales. Van acá y no en la plantilla porque son criterio del DOMINIO; la
+  # plantilla es la forma.
   rules: |-
     - Extrae SOLO entidades medicas concretas (no conceptos vagos)
     - SIEMPRE usa nombres canonicos en ESPAÑOL, sin importar el idioma del texto.
@@ -374,6 +415,14 @@ extraction:
     - El destino de una relacion es siempre una entidad CON NOMBRE, nunca el nombre de un tipo
       del vocabulario ni su plural. "PERTENECE_A los betalactamicos" sirve; "PERTENECE_A
       grupo_farmacologico" o "PERTENECE_A enzimas" no.
+    - Cada relacion lleva "evidencia": el tramo del fragmento, COPIADO tal cual y corto (hasta
+      160 caracteres), que la afirma en esa direccion y nombra a los dos extremos. Sin ese tramo
+      la relacion no se emite: si la sabes pero el fragmento no la dice, no va. Si el tramo la
+      NIEGA (previene, evita, reduce, no produce, contraindicado) la relacion no existe: no la
+      des vuelta ni le cambies el verbo.
+    - Entre dos entidades del mismo tipo la direccion la fija el ejemplo de cada relacion:
+      "la neumonia COMPLICACION_DE la gripe" (la neumonia es la complicacion), "la cirrosis
+      CAUSADA_POR la hepatitis c" (la causa va en "hasta").
 
 # Los cuatro valores nuevos (14-sep-2026) DECLARAN LA CONDUCTA DE HOY, no la cambian:
 #   · max_name_length 100  — era un literal `len(nombre) > 100` en `_validate_extraction`.
