@@ -46,8 +46,18 @@ SNIPPET_CHARS = 320
 #: Cuanto texto devuelve `fetch`. Es defensivo: una tool no deberia devolver un documento entero, y
 #: varios clientes truncan la respuesta sin avisar. `metadata.truncated` lo dice cuando pasa.
 MAX_TEXT_CHARS = 12000
-#: Cuanto texto de cada unidad viaja en un `deep_dive`: son decenas de unidades en una respuesta.
-DEEP_DIVE_MAX_CHARS = 1100
+#: EL TOPE DE TEXTO POR PASAJE DE `deep_dive`. 2.000 desde el 20-sep-2026; era 1.100.
+#:
+#: POR QUE 2.000, medido sobre el corpus real: el chunk (el hijo) mide 1.745 caracteres de mediana
+#: en LexGraph y 1.829 en MedGraph, y el p95 de LexGraph es 1.942. Con 1.100 el 91 % de los
+#: pasajes llegaba truncado por la mitad; con 2.000 entra entero el ~96 %. Es el mismo numero en
+#: los tres servicios a proposito (LexGraph, MedGraph, engine): los chunkeo el mismo pipeline.
+#:
+#: LO QUE CUESTA: deep_dive devuelve entre 30 y 100 pasajes, asi que el payload por llamada sube
+#: hasta x1,8. Se acepto (Ivan, 20-sep) porque la alternativa era entregar medio parrafo; si algun
+#: dia aprieta la ventana de contexto del modelo que consume el MCP, la palanca es `per_facet`, no
+#: volver a cortar el texto. Ver medgraph/docs/HALLAZGO-ventana-del-padre-20sep.md.
+DEEP_DIVE_MAX_CHARS = 2000
 
 #: `deep_dive` agrupa por padre POR DEFECTO, al reves que `search` (contrato §3.6): un documento se
 #: escribe con pasajes enteros y no con cinco recortes de la misma pagina. La ventana del padre ya
