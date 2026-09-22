@@ -380,7 +380,16 @@ chunk:
   max_parent_words: 1200
 
 extraction:
-  model: gemini-3.1-flash-lite
+  # 21-sep-2026: `gemini-3.8-flash`, medido contra `gemini-3.1-flash-lite` sobre LAS MISMAS 39
+  # unidades que juzgo `medicina@6` el 20-sep, con el mismo juez y la misma receta
+  # (`medgraph/docs/DISENO-migracion-gemini-3-21sep.md` §8). Lo que compro el cambio:
+  # `j3_relacion` 3,06 -> 3,71 (por primera vez por encima del techo de los positivos), 155 -> 96
+  # descartes del validador y --el renglon que lo decide-- relaciones INVERTIDAS 21 -> 1.
+  # Lo que cuesta: 2,75x (US$ 0,1014 -> US$ 0,2803 por 39 chunks medidos), o sea ~US$ 2,80 por
+  # 1.000 chunks contra US$ 1,02. Y una advertencia de operacion: en `global` este modelo devuelve
+  # 429 seguido (25,2 s por llamada contra 4,2 s), asi que una ingesta grande tarda ~6x mas hasta
+  # que se suba la cuota. `EXTRACT_MODEL` lo pisa sin tocar el perfil si hace falta volver atras.
+  model: gemini-3.8-flash
   batch_size: 3
   min_words: 100
   # Caracteres de cada fragmento que viajan al prompt (`chunk['text'][:2500]`). Era un literal

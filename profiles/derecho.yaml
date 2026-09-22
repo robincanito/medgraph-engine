@@ -1,73 +1,208 @@
 # Perfil de dominio: derecho argentino (LexGraph)
 # Fuente: taxonomía en producción de legal_extractor.py (2026-07)
+#
+# VERSION 2 (21-sep-2026, `nomos/knowledge/DISENO-nivelar-lexgraph-21sep.md` §N4). Lleva el perfil
+# a la paridad de `medicina@5/@6` y, sobre todo, **lo pone de acuerdo con el grafo que existe**.
+#
+# LA CAUSA RAIZ, y es lo que hace que N4 no sea un `SET r.tipo`: el grafo jurídico NO lo produjo
+# este perfil. Lo produjo `medgraph/_legacy/legal_extractor.py`, un script **archivado el 7-sep**
+# que no se mantiene ni se lintea, con una taxonomía escrita a mano de 8 tipos y 14 relaciones. La
+# v1 de este archivo declaraba ONCE relaciones y el grafo tiene tres que no figuraban en ninguna
+# parte: `COMPETENTE_EN` (1.247 aristas), `RELACIONADO_CON` (4.059) y `SANCIONA` (448). O sea que
+# el descriptor publicaba un vocabulario que no describía el grafo, y un cliente que dibujara a
+# partir de `relation_types` perdía 5.754 aristas sin enterarse. **v2 las declara.**
+#
+# QUE CAMBIA, punto por punto:
+#
+#   1. LAS TRES RELACIONES HUERFANAS ENTRAN, con from/to y ejemplo. Dos de ellas acotadas:
+#      · `COMPETENTE_EN` era el cajón de sastre. Medido sobre «secuestro prendario»: se lleva
+#        **5 de 8 aristas y sólo una tiene sentido** — un fallo *interpreta*, un artículo
+#        *regula*, un acreedor prendario no es "competente en" nada. Desde v2 sólo puede salir de
+#        una `institution`: la competencia es un atributo de un ÓRGANO, no de una norma ni de una
+#        parte. Con eso, las cuatro aristas mal tipadas del ejemplo dejan de ser producibles.
+#      · `SANCIONA` sólo desde la norma o el órgano que sanciona.
+#      · `RELACIONADO_CON` queda laxa A PROPOSITO, como `ASOCIADA_A` en medicina, y el prompt
+#        dice que es el último recurso. Borrarla no la haría desaparecer del grafo; declararla
+#        con su ejemplo la vuelve legible.
+#   2. EVIDENCIA POR RELACION (`extraction.evidencia_relaciones: true`), igual que medicina@5:
+#      cada arista trae el tramo del fragmento que la afirma, copiado tal cual y corto. Hoy las
+#      116.722 relaciones del grafo tienen `keys(r) = []`: **no se pueden reportar como evidencia
+#      sin verificarlas una por una**, que es lo contrario de para qué sirven.
+#   3. POLARIDAD (`afirma`/`niega`) en las relaciones donde el verbo decide, y en derecho la que
+#      más importa no es causal: es `DEROGA`/`MODIFICA`. «La ley 27.447 NO derogó el art. 5» y
+#      «la ley 27.447 derogó el art. 5» son la diferencia entre una norma vigente y una que no.
+#   4. `sinonimos` por tipo (defecto 2 del juez de medicina): las superficies con que la prosa
+#      jurídica nombra a LA CLASE. Un extremo que se llama "la ley" o "el artículo" no es una
+#      entidad, es el nombre de la clase, y el validador lo descarta.
+#   5. `ejemplo` en cada relación extraíble: fija la DIRECCION, que en medicina fue el defecto 1
+#      del juez (8,27 % de las relaciones del corpus estaban dadas vuelta).
+#
+# LO QUE v2 NO HACE, y hay que decirlo:
+#   · NO re-extrae nada. El grafo cargado es `derecho@1` --en rigor, la taxonomía del script
+#     archivado-- y sigue siendo comparable consigo mismo, no con lo que se extraiga desde hoy.
+#   · NO renombra `REGULADO_POR` a `REGULA`. La aceptación de T6 está escrita como «`expand_concept`
+#     sobre secuestro prendario tiene que dar REGULA para el art. 39 del decreto de prenda», y el
+#     hecho es el mismo con el nombre que el grafo ya usa y que el retrieval ya recorre
+#     (`services/legal.py` nombra `REGULADO_POR` en dos consultas): «secuestro prendario
+#     REGULADO_POR articulo 39 ley 12.962», que es lo correcto y NO `COMPETENTE_EN`. Renombrar
+#     serían 5.970 aristas migradas y dos consultas reescritas para ganar una preposición.
+#     **[decisión N4.c] de Iván** si prefiere el nombre literal.
+#   · NO toca `parse` ni `chunk`: el corpus no se re-chunkea.
 profile: derecho
-version: 1
+version: 2
 language: es
 
 graph:
   target: lexgraph            # resuelve a secret lexgraph-neo4j-uri
   name_property: name
 
+# `sinonimos`: las superficies con que la prosa jurídica nombra a la CLASE, no a una entidad. El
+# validador las usa para un solo fin: un nombre que ES la clase no es una entidad ni puede ser
+# extremo de una relación. «REGULADO_POR la ley» no sirve; «REGULADO_POR la ley 24.522» sí.
 entities:
   - id: law
     label: Law
     desc: "leyes, códigos, decretos, resoluciones: ley 25.065, CCyC, DNU 70/2023, ley 24.240"
+    sinonimos: [ley, leyes, norma, normas, código, códigos, decreto, decretos, resolución,
+                resoluciones, la normativa, el régimen legal]
   - id: article
     label: Article
     desc: "artículos de una norma, con su norma: articulo 14 ley 25.065, articulo 770 ccyc"
+    sinonimos: [artículo, artículos, art, arts, inciso, incisos, el articulado]
   - id: legal_concept
     label: LegalConcept
     desc: "conceptos jurídicos: intereses punitorios, nulidad, consumidor, buena fe, mora"
+    sinonimos: [concepto, conceptos, concepto jurídico, instituto, institutos, figura, figuras]
   - id: jurisprudence
     label: Jurisprudence
     desc: "fallos y precedentes: 'Halabi', plenario 'Uzal', CSJN Fallos 330:563"
+    sinonimos: [fallo, fallos, sentencia, sentencias, precedente, precedentes, jurisprudencia,
+                plenario, plenarios, la doctrina judicial]
   - id: institution
     label: Institution
     desc: "órganos e instituciones: CSJN, BCRA, AFIP, Congreso de la Nación"
+    sinonimos: [órgano, órganos, tribunal, tribunales, juzgado, juzgados, organismo, organismos,
+                autoridad de aplicación, la administración]
   - id: legal_procedure
     label: LegalProcedure
     desc: "procesos y actos procesales: amparo, pericia contable, impugnación, recurso extraordinario"
+    sinonimos: [proceso, procesos, procedimiento, procedimientos, acto procesal, actos procesales,
+                recurso, recursos, trámite, trámites]
   - id: legal_principle
     label: LegalPrinciple
     desc: "principios del derecho: in dubio pro consumidor, pacta sunt servanda, congruencia"
+    sinonimos: [principio, principios, principio general, principios generales, regla, reglas]
   - id: doctrine
     label: Doctrine
     desc: "doctrina y autores citados como fuente interpretativa"
+    sinonimos: [doctrina, autor, autores, autora, autoras, la opinión de la doctrina,
+                los autores, comentario, comentarios]
 
+# LA DIRECCION LA FIJA EL `ejemplo` (defecto 1 del juez en medicina: 8,27 % de las relaciones del
+# corpus médico estaban dadas vuelta y las cumplirían al revés). Hasta v1 el prompt de derecho
+# renderizaba `{relations_desc}` con from/to pero SIN ejemplo, así que "quién va en desde" era una
+# inferencia del modelo sobre el nombre de la relación.
 relations:
   - id: REGULADO_POR
     from: [legal_concept, legal_procedure]
     to: [law, article]
+    ejemplo: 'el secuestro prendario REGULADO_POR el articulo 39 ley 12.962 — la NORMA va en
+      "hasta" y el instituto en "desde"; un artículo no está "regulado por" un concepto'
+    afirma: [regul, rige, se rige, previst, establec, contempl, dispone, legisl, encuadr,
+             normad, reglament, se aplica]
+    niega: [no regul, no rige, no se aplica, no previst, no contempl, ajeno a, excluid,
+            no alcanza, derogad]
   - id: PARTE_DE
     from: [article]
     to: [law]
+    ejemplo: 'el articulo 39 ley 12.962 PARTE_DE la ley 12.962 — la norma entera va en "hasta"'
   - id: DEFINE
     from: [article, law]
     to: [legal_concept]
+    ejemplo: 'el articulo 1 ley 24.240 DEFINE al consumidor — quien define va en "desde" y lo
+      definido en "hasta"; un concepto no "define" a una norma'
   - id: INTERPRETA
     from: [jurisprudence, doctrine]
     to: [law, article, legal_concept]
+    ejemplo: 'el fallo "Rombo c. Ruiz" INTERPRETA el articulo 39 ley 12.962 — el fallo o el autor
+      va en "desde"; un artículo no interpreta, se lo interpreta'
+    afirma: [interpret, sostiene, entendi, resolvi, declar, considera, sienta, fija el criterio,
+             se pronunci, dijo, señal]
+    niega: [no se pronunci, no interpret, obiter, no resolvi, dejó sin tratar, no aborda]
   - id: MODIFICA
     from: [law]
     to: [law, article]
+    ejemplo: 'la ley 26.361 MODIFICA el articulo 8 ley 24.240 — la norma REFORMADORA va en "desde"
+      y la reformada en "hasta"'
+    # LA POLARIDAD QUE MAS IMPORTA EN DERECHO (v2). Medicina la puso para las causales; acá el
+    # verbo decide si una norma está vigente o no, que es el §2.7 del stress test: un comentario
+    # remitía a la ley 24.193 "modificada por la 26.066" cuando la vigente es la 27.447, y NINGUNA
+    # defensa de la instancia lo detectaba.
+    afirma: [modific, sustituy, reform, incorpor, agreg, reemplaz, texto según, t.o., según ley]
+    niega: [no modific, no sustituy, mantiene, conserva, no altera, sin cambios, proyecto,
+            proyectad]
   - id: DEROGA
     from: [law]
     to: [law, article]
+    ejemplo: 'la ley 26.994 DEROGA la ley 340 — la norma DEROGANTE va en "desde"'
+    afirma: [derog, dej sin efecto, abrog, suprim, quedan derogad, pierde vigencia]
+    niega: [no derog, mantiene vigente, sigue rigiendo, continúa en vigor, no abrog, subsist,
+            ultraactiv]
   - id: REMITE_A
     from: [article]
     to: [article, law]
+    ejemplo: 'el articulo 1094 ccyc REMITE_A la ley 24.240 — quien remite va en "desde"'
   - id: FUNDAMENTA
     from: [legal_principle]
     to: [legal_concept, jurisprudence]
-  - id: REQUISITO_DE          # draft — validar contra grafo real
+    ejemplo: 'el principio protectorio FUNDAMENTA la interpretación más favorable al consumidor —
+      el PRINCIPIO va en "desde"'
+  - id: REQUISITO_DE
     from: [legal_concept]
     to: [legal_concept, legal_procedure]
-  - id: EXCEPCION_A           # draft — validar contra grafo real
+    ejemplo: 'la mora del deudor REQUISITO_DE la ejecución prendaria — el requisito va en "desde"
+      y aquello que lo exige en "hasta"'
+  - id: EXCEPCION_A
     from: [legal_concept]
     to: [legal_concept]
+    ejemplo: 'la prenda flotante EXCEPCION_A el desapoderamiento — la excepción va en "desde"'
   - id: APLICA
     from: [jurisprudence, institution]
     to: [legal_principle, legal_concept]
+    ejemplo: 'la CSJN APLICA el principio in dubio pro consumidor — quien aplica va en "desde"'
+
+  # ── LAS TRES QUE EL GRAFO TIENE Y EL PERFIL NO DECLARABA (v2, 21-sep-2026) ──────────────
+  - id: COMPETENTE_EN
+    # ACOTADA A PROPOSITO. Con `from: [institution]` las cuatro aristas mal tipadas de
+    # «secuestro prendario» dejan de ser producibles: un ARTICULO no es competente (regula), un
+    # FALLO no es competente (interpreta) y un ACREEDOR PRENDARIO no es competente en nada. La
+    # competencia es un atributo de un ÓRGANO, y eso es lo que el tipo dice ahora.
+    from: [institution]
+    to: [legal_procedure, legal_concept]
+    ejemplo: 'la justicia comercial COMPETENTE_EN el concurso preventivo — el TRIBUNAL u órgano va
+      en "desde" y la materia en "hasta". Si lo que querés decir es que una norma rige algo, eso
+      es REGULADO_POR; si un fallo dijo algo, es INTERPRETA'
+    afirma: [competent, entiende en, es competente, corresponde al fuero, jurisdicción,
+             radicad, se tramita ante]
+    niega: [incompetent, no es competente, declina, se inhibe, excede la competencia,
+            ajeno al fuero]
+  - id: SANCIONA
+    from: [law, article, institution]
+    to: [legal_concept, legal_procedure]
+    ejemplo: 'el articulo 47 ley 24.240 SANCIONA la infracción del proveedor — la norma o el órgano
+      que impone la sanción va en "desde" y la conducta sancionada en "hasta"'
+    afirma: [sancion, reprim, multa, pena, castig, apercibimiento, clausura, inhabilit]
+    niega: [no sancion, exime, eximente, no es punible, atipic, sin sanción, absuelv, sobresee]
+  - id: RELACIONADO_CON
+    # LAXA A PROPOSITO, igual que `ASOCIADA_A` en medicina, y por eso el prompt la nombra como
+    # último recurso: 4.059 aristas del grafo la usan y la alternativa —borrarla— dejaría el
+    # descriptor negando lo que el grafo tiene.
+    from: [law, article, legal_concept, jurisprudence, institution, legal_procedure,
+           legal_principle, doctrine]
+    to: [law, article, legal_concept, jurisprudence, institution, legal_procedure,
+         legal_principle, doctrine]
+    ejemplo: 'el anatocismo RELACIONADO_CON los intereses punitorios — vínculo sin dirección ni
+      naturaleza declarada. Es el ULTIMO recurso: si hay una relación más específica, usá ésa'
 
 # Como se PARSEA y se CHUNKEA una norma (9-sep-2026, ver pipeline/estrategia.py).
 # ACA SE VE POR QUE EL PERFIL MANDA: con los numeros de medicina (280 palabras, solape 60) un
@@ -93,10 +228,21 @@ chunk:
   max_parent_words: 4000
 
 extraction:
-  model: gemini-3.1-flash-lite
+  # `gemini-3.8-flash` (21-sep-2026): el único modelo de lenguaje del ecosistema, por decisión de
+  # Iván. En medicina el cambio desde `3.1-flash-lite` está MEDIDO con el juez sobre las mismas 39
+  # unidades: `j3_relacion` 3,06 -> 3,71, 155 -> 96 descartes del validador y relaciones
+  # INVERTIDAS 21 -> 1, a 2,75x de costo (~US$ 2,80 por 1.000 chunks contra US$ 1,02). En derecho
+  # NO está medido todavía: lo mide la etapa 0 de N4. Vive sólo en `global` (404 en us-central1) y
+  # ahí devuelve 429 seguido, así que una ingesta grande tarda varias veces más hasta que se suba
+  # la cuota. `EXTRACT_MODEL` lo pisa sin tocar el perfil.
+  model: gemini-3.8-flash
   batch_size: 3
   min_words: 100
   max_chars_fragmento: 2500
+  # v2: cada relación trae su `evidencia` y el validador la exige y la lee (que exista, que esté
+  # en el fragmento, que nombre los dos extremos, que no la niegue el verbo). Es la mitad de N4:
+  # sin esto, ninguna de las 116.722 aristas se puede reportar sin verificarla a mano.
+  evidencia_relaciones: true
   prompt_template: prompts/derecho.md
   # `|-` como en medicina: la plantilla pone `{rules}` seguido de un renglón en blanco, así que
   # un salto de línea de más acá mete un renglón vacío en el prompt. Lo que rige es el golden
@@ -109,6 +255,27 @@ extraction:
     - Texto vigente manda: si un artículo fue sustituido (ej. DNU 70/2023), extraer la
       relación MODIFICA, no tratar el texto viejo como vigente.
     - NO extraer números de expediente, fechas ni montos como entidades.
+    - Cada entidad tiene que estar NOMBRADA en el fragmento. Lo que el fragmento no menciona no
+      se extrae, aunque sepas que corresponde al tema: se descarta y se cuenta.
+    - El nombre canonico casi nunca es como el fragmento lo escribe: pone la SUPERFICIE DEL TEXTO
+      en "sinonimos" ("art. 39", "la LDC", "el codigo"). La evidencia se verifica contra el
+      fragmento, asi que sin la superficie una relacion correcta se descarta igual.
+    - La DIRECCION de cada relación es la de su definición: el primer grupo de tipos es lo que
+      puede ir en "desde" y el segundo lo que puede ir en "hasta". Una relación dada vuelta se
+      descarta, así que si dudás mirá el ejemplo.
+    - El destino de una relación es siempre una entidad CON NOMBRE, nunca el nombre de un tipo
+      del vocabulario ni su plural. "REGULADO_POR la ley 12.962" sirve; "REGULADO_POR la ley" o
+      "REGULADO_POR normas" no.
+    - COMPETENTE_EN es SOLO para un órgano: un tribunal, un registro, una autoridad de
+      aplicación. Una norma no es competente, REGULA (REGULADO_POR); un fallo no es competente,
+      INTERPRETA. RELACIONADO_CON es el último recurso: si hay una relación más específica, usá ésa.
+    - Cada relación lleva "evidencia": el tramo del fragmento, COPIADO tal cual y corto (hasta
+      160 caracteres), que la afirma en esa dirección y nombra a los dos extremos. Sin ese tramo
+      la relación no se emite: si la sabés pero el fragmento no la dice, no va. Si el tramo la
+      NIEGA (no se aplica, quedó derogado, se declaró incompetente, no es punible) la relación no
+      existe: no la des vuelta ni le cambies el verbo.
+    - Una norma que DEROGA o MODIFICA a otra sólo se extrae si el fragmento lo afirma. "El
+      proyecto derogaría el artículo 5" no es una derogación.
 
 # `max_name_length: 120` es el valor que usaba `legal_extractor.py` (medicina usa 100): el nombre
 # canónico de un artículo lleva su norma adentro ("articulo 770 codigo civil y comercial de la
