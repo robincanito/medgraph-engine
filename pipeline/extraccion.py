@@ -1314,7 +1314,8 @@ def cargar(write, tx: Taxonomia, entidades: list, relaciones: list, libro_id: st
     SIN `chunks` la conducta es la de siempre —aditiva—, y es a proposito: un llamador que no
     sabe que fragmentos cubre su artefacto no puede afirmar que los esta reemplazando. Los tres
     caminos de produccion (el CLI de `ingest.py`, los dos `--upload` de los extractores) SI lo
-    pasan, y hay un test que lo fija.
+    pasan, y hay un test que lo fija. **Con `dev_mode` tampoco se reemplaza**: ver el comentario
+    de la purga.
 
     LO QUE EL REEMPLAZO NO HACE, dicho antes de que alguien lo suponga: no borra NODOS. Una
     entidad que ningun fragmento vuelve a nombrar se queda sin `MENCIONA` y sin aristas, pero el
@@ -1347,7 +1348,12 @@ def cargar(write, tx: Taxonomia, entidades: list, relaciones: list, libro_id: st
     # Va primero y no despues por una razon que cuesta cara si se invierte: si se purgara
     # DESPUES del MERGE, la purga se llevaria puesto lo que este mismo lote acaba de escribir
     # (sus entradas tambien son "de estos fragmentos") y la carga terminaria con el grafo vacio.
-    if chunks:
+    # `dev_mode` NO REEMPLAZA, y hay que decir por que porque el default invita al error. El
+    # sufijo `Dev` es de los LABELS; la purga entra por el TIPO de la arista y por el chunk, que
+    # son los mismos en los dos grafos. O sea que una carga a `PatologiaDev` con `chunks` se
+    # llevaria puesta la procedencia --y las `MENCIONA`-- del grafo de PRODUCCION, que es
+    # exactamente lo contrario de para que existe el grafo paralelo.
+    if chunks and not dev_mode:
         for i in range(0, len(chunks), LOTE):
             _escribir_purga(CYPHER_PURGA_MENCIONA, {"batch": chunks[i:i + LOTE]},
                             "purga:MENCIONA")
