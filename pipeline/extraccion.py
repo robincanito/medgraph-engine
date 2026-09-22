@@ -82,12 +82,11 @@ from __future__ import annotations
 import json
 import logging
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 
-from pipeline import eventos
+from pipeline import eventos, normalizacion
 
 log = logging.getLogger(__name__)
 
@@ -153,7 +152,6 @@ _RX_FIN_DE_ORACION = re.compile(r"[.!?]\s+[A-ZÁÉÍÓÚÑ¿¡]")
 
 _ID_ENTIDAD = re.compile(r"^[a-z][a-z0-9_]*$")
 _ID_RELACION = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_NO_PALABRA = re.compile(r"[^0-9a-zA-ZÀ-ſ]+")
 #: Un marcador es `{` + minusculas/guion bajo + `}`. La llave de un ejemplo de JSON
 #: (`{"resultados"…`) NO matchea, que es lo que permite escribir la plantilla con llaves
 #: simples y legibles en vez de duplicadas como exigia el `str.format` del codigo viejo.
@@ -600,8 +598,12 @@ def normalizar_nombre(nombre: str, tx: Taxonomia | None = None) -> str:
     nombre = re.sub(r"[\.;,]+$", "", nombre).strip()
     nombre = re.sub(r"\s+", " ", nombre)
     if tx is not None and tx.plegar_acentos:
-        nombre = "".join(c for c in unicodedata.normalize("NFD", nombre)
-                         if unicodedata.category(c) != "Mn")
+        # `normalizacion.sin_acentos` (R3, 22-sep-2026) y no las dos lineas de NFD que habia aca.
+        # RAMA MUERTA HOY: `fold_accents` es `false` en los tres perfiles, asi que esto no corre y
+        # el cambio (NFD -> NFKD) no puede mover nada del corpus actual. Lo que gana: el dia que se
+        # encienda, la ligadura del PDF ("ﬁbrosis") se escribe como "fibrosis" en el nombre canonico
+        # en vez de quedarse pegada.
+        nombre = normalizacion.sin_acentos(nombre)
     return nombre
 
 
@@ -613,11 +615,16 @@ def _plegar(texto: str) -> str:
     migracion). Acá plegar acentos es gratis y necesario: "insuficiencia cardíaca" tiene que
     encontrarse en un pasaje que escriba "insuficiencia cardiaca", y ninguno de los dos nombres
     se guarda en ninguna parte.
+
+    ES `normalizacion.plegar` DESDE EL 22-sep-2026 (R3), y el cambio NO fue cosmetico: la version
+    anterior descomponia con **NFD** despues de pasar `_NO_PALABRA = [^0-9a-zA-ZÀ-ſ]+`, y la
+    ligadura tipografica que todo PDF escupe (`ﬁ`, U+FB01) cae FUERA de ese rango. Resultado
+    medido: `_plegar("ﬁbrosis")` daba **`"brosis"`** —la palabra perdia sus dos primeras letras— y
+    `_aparece` no encontraba "fibrosis quistica" en un fragmento que la nombra, asi que el
+    validador **descartaba la relacion**. Con NFKD la ligadura se descompone antes y da
+    `"fibrosis"`. El cambio hace que el validador acepte MAS, y solo donde antes se equivocaba.
     """
-    texto = _NO_PALABRA.sub(" ", (texto or "").strip().lower())
-    texto = "".join(c for c in unicodedata.normalize("NFD", texto)
-                    if unicodedata.category(c) != "Mn")
-    return re.sub(r"\s+", " ", texto).strip()
+    return normalizacion.plegar(texto)
 
 
 def _mismo_token(a: str, b: str) -> bool:

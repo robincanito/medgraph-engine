@@ -28,38 +28,50 @@ class TestParser:
         assert normalize_name("  múltiples   espacios  ") == "múltiples espacios"
         assert normalize_name("") == ""
 
-    def test_strip_accents(self):
-        from dedup_entities import strip_accents
-        assert strip_accents("hipertensión") == "hipertension"
-        assert strip_accents("diagnóstico") == "diagnostico"
-        assert strip_accents("farmacología") == "farmacologia"
-        assert strip_accents("normal") == "normal"
+    def test_clave_por_acentos(self):
+        """La regla del dedup: sin tildes y en minusculas, y nada mas."""
+        from dedup_entities import clave_por_acentos
+        assert clave_por_acentos("hipertensión") == "hipertension"
+        assert clave_por_acentos("DIAGNÓSTICO") == "diagnostico"
+        assert clave_por_acentos("normal") == "normal"
 
-    def test_has_accents(self):
-        from dedup_entities import has_accents
-        assert has_accents("hipertensión") is True
-        assert has_accents("hipertension") is False
+    def test_el_canonico_es_el_de_mayor_degree(self):
+        """Reescrito el 22-sep-2026: antes se elegia por (tiene acentos, `freq`), y `freq` se
+        sobreescribe en cada carga de libro -- en el grafo es la del ULTIMO libro que cargo la
+        entidad, no la del corpus. El degree acumula, y es lo que decide quien gana en la
+        recuperacion."""
+        from dedup_entities import canonico_de
+        canon, dups = canonico_de([
+            {"eid": "a", "nombre": "hipertension", "freq": 10, "degree": 3},
+            {"eid": "b", "nombre": "hipertensión", "freq": 5, "degree": 40},
+        ])
+        assert canon["nombre"] == "hipertensión" and [d["eid"] for d in dups] == ["a"]
 
-    def test_pick_canonical(self):
-        from dedup_entities import pick_canonical
-        nodes = [
-            {"nombre": "hipertension", "freq": 10, "sinonimos": []},
-            {"nombre": "hipertensión", "freq": 5, "sinonimos": ["HTA"]},
+    def test_los_grupos_llevan_los_labels(self):
+        """Nunca entre labels distintos, y por construccion: la clave del grupo ES (labels, nombre
+        plegado). Agrupar label por label dejaba fundir un nodo de dos labels con uno de uno."""
+        from dedup_entities import grupos_de
+        entidades = [
+            {"eid": "1", "nombre": "hipertensión", "labels": ["Patologia"], "freq": 1, "degree": 9},
+            {"eid": "2", "nombre": "hipertension", "labels": ["Patologia"], "freq": 1, "degree": 2},
+            {"eid": "3", "nombre": "diabetes", "labels": ["Patologia"], "freq": 1, "degree": 1},
+            {"eid": "4", "nombre": "hipertension", "labels": ["Hallazgo"], "freq": 1, "degree": 5},
         ]
-        canon = pick_canonical(nodes)
-        assert canon["nombre"] == "hipertensión"  # prefers accented
+        grupos = grupos_de(entidades)
+        assert len(grupos) == 1
+        assert grupos[0]["labels"] == ["Patologia"]
+        assert grupos[0]["canonico"]["nombre"] == "hipertensión"
+        assert [d["eid"] for d in grupos[0]["duplicados"]] == ["2"]
 
-    def test_find_accent_groups(self):
-        from dedup_entities import find_accent_groups
-        entities = [
-            {"nombre": "hipertensión"},
-            {"nombre": "hipertension"},
-            {"nombre": "diabetes"},
-        ]
-        groups = find_accent_groups(entities)
-        assert len(groups) == 1
-        assert "hipertension" in groups
-        assert len(groups["hipertension"]) == 2
+    def test_la_fusion_escribe_la_procedencia_de_la_arista(self):
+        """El Cypher que funde dos nodos es UNO SOLO (`pipeline/fusion.py`) y funde las cuatro
+        listas paralelas de la arista: sin eso, fundir borraba el linaje del fragmento."""
+        from pipeline.fusion import sentencias_de_grupo
+        sent = sentencias_de_grupo("C", ["D"], ["SE_TRATA_CON"])
+        assert [s["nombre"] for s in sent] == ["reapuntar_salientes", "reapuntar_entrantes",
+                                               "canonico", "borrar_dups"]
+        for campo in ("chunks", "libros", "perfiles", "evidencias"):
+            assert f"nr.{campo}" in sent[0]["cypher"]
 
 
 class TestChunking:

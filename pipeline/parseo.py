@@ -20,8 +20,9 @@ cargar el modulo le costaba ~10 s a cada arranque en frio de Cloud Run (1-sep-20
 import logging
 import os
 import re
-import unicodedata
 from collections import Counter
+
+from pipeline import normalizacion
 
 # Los parametros de chunkeo y los patrones de estructura viven en pipeline/estrategia.py:
 # son del DOMINIO, no del codigo. Se re-exportan con los nombres de siempre para no romper a
@@ -499,19 +500,25 @@ MAX_PERDIDA_TABLA = 0.10
 def sin_acentos(texto: str) -> str:
     """El texto sin tildes ni diéresis, CONSERVANDO la caja.
 
-    Es la mitad de `normalize_for_search` que también necesita `detect_structure` para decidir
-    si una línea es un encabezado (18-sep-2026, T5): ahí la comparación se hace sobre el texto
-    plegado —`CAPITULO 268` tiene que entrar por `^CAPÍTULO\\s+\\d+`— pero el título que se
-    GUARDA es el original, con sus tildes. Una sola definición de "quitar acentos" para las dos
-    cosas: dos serían dos normalizaciones que divergen en silencio.
+    EL CUERPO SE MUDÓ a `pipeline/normalizacion` (R3, 22-sep-2026), sin cambiar una línea. Acá
+    queda el nombre de siempre, que es el que usan `detect_structure` (para decidir si una línea es
+    un encabezado: la comparación va sobre el texto plegado —`CAPITULO 268` tiene que entrar por
+    `^CAPÍTULO\\s+\\d+`— pero el título que se GUARDA es el original, con sus tildes) y los shims
+    del CLI.
     """
-    nfkd = unicodedata.normalize('NFKD', texto)
-    return ''.join(c for c in nfkd if not unicodedata.combining(c))
+    return normalizacion.sin_acentos(texto)
 
 
 def normalize_for_search(text: str) -> str:
-    """Quita acentos y pasa a minúsculas para full-text search."""
-    return sin_acentos(text).lower()
+    """Quita acentos y pasa a minúsculas para full-text search.
+
+    ES LA MITAD DE ESCRITURA DE UN CONTRATO: lo que `normalize_chunks` guarda en `text_busqueda`.
+    La mitad de LECTURA es `services/vector._normalize`, que hasta el 22-sep-2026 era una copia
+    literal de estas mismas dos líneas — una copia de cada lado de un contrato es la forma más cara
+    de romperlo: divergen y la búsqueda léxica pide una forma que nadie indexó, devolviendo menos
+    sin fallar. Desde R3 las dos llaman a `normalizacion.para_busqueda`.
+    """
+    return normalizacion.para_busqueda(text)
 
 
 def candidatos_de_folio(texto: str, borde: int = LINEAS_DE_BORDE) -> set:

@@ -1,306 +1,313 @@
-"""Deduplicación de entidades en Neo4j - Fase 1: Normalización de acentos.
+"""Deduplicacion de entidades por ACENTOS Y CAJA. Informe primero, escritura despues.
 
-Encuentra entidades duplicadas que difieren solo por acentos/tildes
-y las mergea en un nodo canónico, transfiriendo todas las relaciones.
+QUE HACE. Junta las entidades cuyo nombre es el mismo una vez sacadas las tildes y bajada la caja
+—«clítoris»/«clitoris», «tórax»/«torax»— y las funde en un nodo canonico, transfiriendole las
+aristas. Es la regla MAS ANGOSTA de las dos que el repo tiene: `eval/_fusion.clave_fusion` (la de
+`eval/fusionar_entidades.py`) ademas pliega la puntuacion, el orden de las palabras, el plural y las
+siglas, y encuentra el doble. **Todo grupo de acentos esta contenido en un grupo de la otra**, asi
+que correr este primero no cambia el estado final: es un paso mas chico y mas facil de leer.
 
-v2: Retry con backoff, batch Cypher por label, checkpoint para retomar.
+NUNCA SE CORRIO SOBRE ESTE CORPUS. Medido el 22-sep-2026 sobre los 154.342 nodos de entidad del
+grafo: **7.362 grupos** y **7.467 nodos** que desaparecerian, todos por acentos.
 
-CLI:
-  python dedup_entities.py              # dry-run (solo reporta)
-  python dedup_entities.py --execute    # ejecuta merge
-  python dedup_entities.py --label Patologia  # solo un label
+LOS TRES DEFECTOS QUE TENIA, y por que habia que arreglarlos ANTES de la primera corrida (R3,
+22-sep-2026). Ninguno se veia porque el guion nunca se ejecuto:
+
+ 1. **Fundia entre labels distintos.** Agrupaba dentro de `MATCH (n:{label})`, label por label, asi
+    que un nodo con DOS labels caia en dos pasadas y se podia fundir con uno de un solo label. La
+    regla de la casa —«nunca entre labels distintos»— no estaba garantizada por construccion. Hoy
+    el grafo no tiene ni un nodo de entidad con mas de un label (medido), o sea que el defecto era
+    latente; la clave del grupo ahora LLEVA el conjunto de labels y no puede volver.
+ 2. **Elegia otro canonico que la fusion.** `pick_canonical` ordenaba por (tiene acentos, `freq`,
+    cantidad de sinonimos) y `freq` **se sobreescribe en cada carga de libro** (`cypher_entidades`
+    hace `SET e.freq = ent.freq`): en el grafo viejo es la frecuencia del ULTIMO libro que cargo la
+    entidad, no del corpus. La vara buena es el `degree`, que si acumula y es lo que decide quien
+    gana en la recuperacion. Con dos varas distintas, correr este guion y despues la fusion dejaba
+    como superviviente un nodo distinto del que la fusion sola habria elegido.
+ 3. **Perdia la procedencia de la arista** (la deuda que R1 dejo anotada,
+    `docs/DISENO-procedencia-22sep.md` §5). El `MERGE (canon)-[:TIPO]->(t)` no copiaba NINGUNA
+    propiedad: el libro, el fragmento, el perfil y la evidencia del duplicado se iban con el nodo.
+    Hoy el grafo tiene cero aristas con procedencia, asi que todavia no hay nada que perder; la
+    primera re-extraccion la escribe, y entonces si. El Cypher ahora es el de
+    `pipeline/fusion.py`, UNA sola copia compartida con `eval/fusionar_entidades.py`.
+
+CLI
+  py -3.13 dedup_entities.py                      # INFORME (dry-run): no escribe nada
+  py -3.13 dedup_entities.py --label Patologia    # un solo label
+  py -3.13 dedup_entities.py --aplicar            # ESCRIBE. Snapshot de la VM antes.
 """
+from __future__ import annotations
 
-import sys
-import os
+import argparse
 import json
+import logging
+import os
+import sys
 import time
-import unicodedata
+from datetime import date
+from pathlib import Path
 
-# Fix Windows encoding
-if sys.stdout.encoding != 'utf-8':
-    sys.stdout.reconfigure(encoding='utf-8')
+RAIZ = Path(__file__).resolve().parent
+sys.path.insert(0, str(RAIZ))
 
-from db import run_query, run_write
+try:
+    import bitacora  # noqa: E402
+except ModuleNotFoundError:            # el espejo OSS (medgraph-engine) no trae bitacora.py
+    bitacora = None
+from db import DATABASE, get_driver, run_query  # noqa: E402
+from pipeline import fusion  # noqa: E402
+from pipeline.normalizacion import para_busqueda  # noqa: E402
+from pipeline.perfiles import taxonomia  # noqa: E402
 
-ENTITY_LABELS = [
-    "Patologia", "EstructuraAnatomica", "Procedimiento", "Farmaco",
-    "GrupoFarmacologico", "Agente", "Signo", "Sintoma",
-    "MetodoDx", "Hallazgo", "Parametro",
-]
+log = logging.getLogger(__name__)
 
-CHECKPOINT_FILE = os.path.join(os.path.dirname(__file__), "dedup_checkpoint.json")
+# LOS LABELS SALEN DEL PERFIL (19-sep-2026, `docs/DISENO-labels-del-perfil-19sep.md`). Estaban
+# escritos a mano y eran ONCE de los doce tipos de `medicina@4`: faltaba `MoleculaBiologica`, o
+# sea que el tipo nuevo de v3 iba a acumular duplicados por acentos que este script jamas
+# hubiera mirado.
+ENTITY_LABELS = list(taxonomia().labels)
+
+CHECKPOINT_FILE = RAIZ / "dedup_checkpoint.json"
 MAX_RETRIES = 3
-RETRY_DELAY = 2  # seconds, doubles each retry
+RETRY_DELAY = 2  # segundos, se duplica en cada reintento
 
 
-def strip_accents(s: str) -> str:
-    nfkd = unicodedata.normalize('NFKD', s)
-    return ''.join(c for c in nfkd if not unicodedata.combining(c))
+def clave_por_acentos(nombre: str) -> str:
+    """LA REGLA: sin tildes y en minusculas, y nada mas.
+
+    `normalizacion.para_busqueda` desde el 22-sep-2026 (antes eran dos lineas propias de NFKD, la
+    cuarta copia del mismo plegado). NO pliega puntuacion, ni orden, ni plural, ni siglas: eso es
+    `eval/_fusion.clave_fusion`, y mezclarlas convertiria a este guion en el otro sin decirlo.
+    """
+    return para_busqueda(nombre or "").strip()
 
 
-def has_accents(s: str) -> bool:
-    return s != strip_accents(s)
-
-
-def retry_query(func, *args, **kwargs):
-    """Execute a DB function with retry + exponential backoff."""
-    for attempt in range(MAX_RETRIES + 1):
+def reintentar(func, *args, **kwargs):
+    """Ejecuta con reintento y backoff: la VM del grafo corta conexiones cuando se despierta."""
+    for intento in range(MAX_RETRIES + 1):
         try:
             return func(*args, **kwargs)
-        except Exception as e:
-            if attempt == MAX_RETRIES:
+        except Exception as e:  # noqa: BLE001 - se reintenta cualquier fallo de red/sesion
+            if intento == MAX_RETRIES:
                 raise
-            delay = RETRY_DELAY * (2 ** attempt)
-            print(f"      Retry {attempt+1}/{MAX_RETRIES} in {delay}s: {str(e)[:60]}")
-            time.sleep(delay)
+            espera = RETRY_DELAY * (2 ** intento)
+            log.warning(f"  reintento {intento + 1}/{MAX_RETRIES} en {espera}s: {str(e)[:60]}")
+            time.sleep(espera)
 
 
-def pick_canonical(nodes: list) -> dict:
-    return max(nodes, key=lambda n: (
-        has_accents(n["nombre"]),
-        n.get("freq") or 0,
-        len(n.get("sinonimos") or []),
-    ))
+# ══════════════════════════════════════════════════════════════════════════════════════
+# LECTURA: los grupos
+# ══════════════════════════════════════════════════════════════════════════════════════
+
+CAMPOS = """elementId(n) AS eid, coalesce(n.nombre, n.name) AS nombre, labels(n) AS labels,
+       coalesce(n.freq, 0) AS freq, COUNT { (n)--() } AS degree"""
 
 
-def load_checkpoint() -> dict:
-    if os.path.exists(CHECKPOINT_FILE):
-        with open(CHECKPOINT_FILE, "r") as f:
-            return json.load(f)
-    return {"completed_labels": [], "stats": {}}
+def censo(consultar, labels: list[str]) -> list[dict]:
+    """Las entidades de esos labels, con su conjunto COMPLETO de labels, freq y degree."""
+    return reintentar(consultar, f"""
+        MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels)
+        RETURN {CAMPOS}""", {"labels": labels})
 
 
-def save_checkpoint(data: dict):
-    with open(CHECKPOINT_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+def canonico_de(miembros: list[dict]) -> tuple[dict, list[dict]]:
+    """El superviviente y los que se funden. **MISMO CRITERIO QUE `eval/fusionar_entidades`**:
+    mayor `degree`, y si empatan `freq`, largo de la etiqueta y `eid`.
+
+    Que las dos herramientas elijan el mismo canonico es lo que hace que correr esta primero sea un
+    subconjunto de la otra y no una decision distinta tomada dos veces.
+    """
+    orden = sorted(miembros, key=lambda m: (-(m.get("degree") or 0), -(m.get("freq") or 0),
+                                            -len(m.get("nombre") or ""), m["eid"]))
+    return orden[0], orden[1:]
 
 
-def fetch_entities(label: str) -> list:
-    return retry_query(run_query, f"""
-        MATCH (n:{label})
-        RETURN elementId(n) AS eid, n.nombre AS nombre,
-               n.freq AS freq, n.sinonimos AS sinonimos
-    """)
+def grupos_de(entidades: list[dict]) -> list[dict]:
+    """Los grupos: dos o mas entidades con LOS MISMOS labels y la misma clave por acentos.
+
+    La clave lleva el conjunto de labels, asi que «nunca entre labels distintos» se cumple por
+    construccion y no por como se recorra el grafo.
+    """
+    por_clave: dict = {}
+    for n in entidades:
+        clave = (tuple(sorted(n.get("labels") or [])), clave_por_acentos(n.get("nombre")))
+        if clave[1]:
+            por_clave.setdefault(clave, []).append(n)
+    grupos = []
+    for (labels, clave), miembros in por_clave.items():
+        if len(miembros) < 2:
+            continue
+        canonico, duplicados = canonico_de(miembros)
+        grupos.append({"clave": clave, "labels": list(labels),
+                       "canonico": canonico, "duplicados": duplicados})
+    return sorted(grupos, key=lambda g: (-(g["canonico"].get("degree") or 0), g["clave"]))
 
 
-def find_accent_groups(entities: list) -> dict:
-    groups = {}
-    for ent in entities:
-        key = strip_accents(ent["nombre"].lower().strip())
-        groups.setdefault(key, []).append(ent)
-    return {k: v for k, v in groups.items() if len(v) > 1}
+def tipos_del_grupo(consultar, grupo: dict) -> list[str]:
+    """Los tipos de relacion que tocan a los duplicados. Salen del grafo y no de una lista escrita
+    a mano: una relacion de un perfil viejo que ya no se extrae tambien hay que re-apuntarla."""
+    filas = reintentar(consultar, """
+        MATCH (d)-[r]-(x) WHERE elementId(d) IN $dups
+        RETURN DISTINCT type(r) AS tipo""",
+        {"dups": [d["eid"] for d in grupo["duplicados"]]})
+    return sorted(f["tipo"] for f in filas)
 
 
-def merge_group_batch(canon: dict, duplicates: list, label: str) -> dict:
-    """Mergea un grupo usando queries batch con retry."""
-    canon_eid = canon["eid"]
-    total = {"menciona": 0, "rels_out": 0, "rels_in": 0, "deleted": 0}
+def dudoso(grupo: dict) -> str | None:
+    """Un grupo DUDOSO no se descarta: se marca para que una persona lo lea.
 
-    all_sinonimos = set(canon.get("sinonimos") or [])
-    total_freq = canon.get("freq") or 0
-    dup_eids = [d["eid"] for d in duplicates]
+    Con la regla por acentos los sospechosos son pocos y de dos clases: los que ademas de tildes
+    difieren en la CAJA (que el extractor no produce hoy: si aparece uno, algo cambio aguas arriba)
+    y los de mas de tres grafias, que suelen ser la misma palabra escrita de todas las formas
+    posibles pero conviene mirar.
+    """
+    etiquetas = [grupo["canonico"]["nombre"]] + [d["nombre"] for d in grupo["duplicados"]]
+    if len({e.lower() for e in etiquetas}) < len({e for e in etiquetas}):
+        return "difieren tambien por MAYUSCULAS: el extractor normaliza al crear, asi que esto no lo produjo el"
+    if len(etiquetas) > 3:
+        return f"{len(etiquetas)} grafias del mismo nombre: mirar que sean la misma palabra"
+    return None
 
-    for dup in duplicates:
-        all_sinonimos.add(dup["nombre"])
-        for s in (dup.get("sinonimos") or []):
-            all_sinonimos.add(s)
-        total_freq += dup.get("freq") or 0
 
-    # 1. Batch: transferir MENCIONA de todos los dups al canon
-    menciona = retry_query(run_query, """
-        UNWIND $dup_eids AS deid
-        MATCH (c:Chunk)-[:MENCIONA]->(dup) WHERE elementId(dup) = deid
-        RETURN DISTINCT elementId(c) AS chunk_eid
-    """, {"dup_eids": dup_eids})
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ESCRITURA
+# ══════════════════════════════════════════════════════════════════════════════════════
 
-    if menciona:
-        retry_query(run_write, """
-            UNWIND $chunks AS ceid
-            MATCH (c) WHERE elementId(c) = ceid
-            MATCH (canon) WHERE elementId(canon) = $canon_eid
-            MERGE (c)-[:MENCIONA]->(canon)
-        """, {"chunks": [m["chunk_eid"] for m in menciona], "canon_eid": canon_eid})
-        total["menciona"] = len(menciona)
+def aplicar(grupos: list[dict], consultar, transaccion, *, avisar=None) -> dict:
+    """Funde cada grupo en UNA transaccion, con el Cypher compartido de `pipeline/fusion.py`.
 
-    # 2. Batch: transferir rels outgoing de todos los dups
-    rels_out = retry_query(run_query, """
-        UNWIND $dup_eids AS deid
-        MATCH (dup)-[r]->(target)
-        WHERE elementId(dup) = deid
-          AND elementId(target) <> $canon_eid
-          AND NOT elementId(target) IN $dup_eids
-          AND type(r) <> 'MENCIONA'
-        RETURN DISTINCT type(r) AS rtype, elementId(target) AS target_eid
-    """, {"dup_eids": dup_eids, "canon_eid": canon_eid})
-
-    if rels_out:
-        by_type = {}
-        for r in rels_out:
-            by_type.setdefault(r["rtype"], []).append(r["target_eid"])
-        for rtype, targets in by_type.items():
-            retry_query(run_write, f"""
-                UNWIND $targets AS teid
-                MATCH (canon) WHERE elementId(canon) = $canon_eid
-                MATCH (t) WHERE elementId(t) = teid
-                MERGE (canon)-[:{rtype}]->(t)
-            """, {"targets": targets, "canon_eid": canon_eid})
-        total["rels_out"] = len(rels_out)
-
-    # 3. Batch: transferir rels incoming de todos los dups
-    rels_in = retry_query(run_query, """
-        UNWIND $dup_eids AS deid
-        MATCH (source)-[r]->(dup)
-        WHERE elementId(dup) = deid
-          AND elementId(source) <> $canon_eid
-          AND NOT elementId(source) IN $dup_eids
-          AND type(r) <> 'MENCIONA'
-        RETURN DISTINCT type(r) AS rtype, elementId(source) AS source_eid
-    """, {"dup_eids": dup_eids, "canon_eid": canon_eid})
-
-    if rels_in:
-        by_type = {}
-        for r in rels_in:
-            by_type.setdefault(r["rtype"], []).append(r["source_eid"])
-        for rtype, sources in by_type.items():
-            retry_query(run_write, f"""
-                UNWIND $sources AS seid
-                MATCH (s) WHERE elementId(s) = seid
-                MATCH (canon) WHERE elementId(canon) = $canon_eid
-                MERGE (s)-[:{rtype}]->(canon)
-            """, {"sources": sources, "canon_eid": canon_eid})
-        total["rels_in"] = len(rels_in)
-
-    # 4. Batch: DETACH DELETE todos los dups de una vez
-    retry_query(run_write, """
-        UNWIND $dup_eids AS deid
-        MATCH (n) WHERE elementId(n) = deid
-        DETACH DELETE n
-    """, {"dup_eids": dup_eids})
-    total["deleted"] = len(duplicates)
-
-    # 5. Actualizar canónico
-    all_sinonimos.discard(canon["nombre"])
-    retry_query(run_write, """
-        MATCH (n) WHERE elementId(n) = $eid
-        SET n.sinonimos = $sins, n.freq = $freq
-    """, {"eid": canon_eid, "sins": sorted(list(all_sinonimos)), "freq": total_freq})
-
+    Idempotente: corrido dos veces, la segunda no encuentra los duplicados y no hace nada.
+    Un grupo que falla se registra y NO corta la corrida: con 7.362 grupos, abortar en el 5.000
+    dejaria el grafo a medio deduplicar y sin manera de saber donde.
+    """
+    total = {"grupos": 0, "nodos": 0, "fallados": 0}
+    for k, g in enumerate(grupos, 1):
+        try:
+            transaccion(fusion.sentencias_de_grupo(
+                g["canonico"]["eid"], [d["eid"] for d in g["duplicados"]],
+                tipos_del_grupo(consultar, g)))
+        except Exception as e:  # noqa: BLE001 - un grupo roto no puede frenar los otros 7.361
+            log.error(f"  grupo '{g['clave']}' FALLO: {type(e).__name__}: {str(e)[:100]}")
+            total["fallados"] += 1
+            continue
+        total["grupos"] += 1
+        total["nodos"] += len(g["duplicados"])
+        if avisar:
+            avisar(k, g)
     return total
 
 
-def dedup_label(label: str, execute: bool = False) -> dict:
-    entities = fetch_entities(label)
-    groups = find_accent_groups(entities)
+# ══════════════════════════════════════════════════════════════════════════════════════
+# EL PARTE
+# ══════════════════════════════════════════════════════════════════════════════════════
 
-    if not groups:
-        return {"groups": 0, "deleted": 0, "menciona": 0, "rels": 0}
+def parte(grupos: list[dict], aplicado: bool, cuantas: int) -> str:
+    nodos = sum(len(g["duplicados"]) for g in grupos)
+    por_label: dict = {}
+    for g in grupos:
+        e = por_label.setdefault("/".join(g["labels"]), {"grupos": 0, "nodos": 0})
+        e["grupos"] += 1
+        e["nodos"] += len(g["duplicados"])
+    dudosos = [(g, d) for g in grupos for d in [dudoso(g)] if d]
+    L = [f"# Dedup por acentos — {'APLICADO' if aplicado else 'informe (dry-run)'} "
+         f"({date.today().isoformat()})", "",
+         "Entidades cuyo nombre es el mismo sin tildes y en minusculas. Es la regla MAS ANGOSTA de "
+         "las dos: todo grupo de aca esta contenido en un grupo de `eval/_fusion.clave_fusion`, que "
+         "ademas pliega puntuacion, orden, plural y siglas. El canonico es el de mayor `degree`, el "
+         "MISMO criterio que la fusion — con dos varas distintas, correr las dos dejaba un "
+         "superviviente que ninguna de las dos habria elegido sola.", "",
+         "| | |", "|---|---|",
+         f"| entidades leidas | {cuantas} |",
+         f"| grupos que se funden | **{len(grupos)}** |",
+         f"| nodos que desaparecen | **{nodos}** |",
+         f"| grupos dudosos (revision a ojo) | {len(dudosos)} |", "",
+         "## Por label", "", "| label | grupos | nodos |", "|---|---|---|"]
+    L += [f"| {k} | {v['grupos']} | {v['nodos']} |"
+          for k, v in sorted(por_label.items(), key=lambda kv: -kv[1]["grupos"])]
+    L += ["", "## Los 40 grupos mas grandes (por degree del canonico)", "",
+          "| label | canonico (degree) | se funden |", "|---|---|---|"]
+    for g in grupos[:40]:
+        L.append(f"| {'/'.join(g['labels'])} | **{g['canonico']['nombre']}** "
+                 f"({g['canonico']['degree']}) | "
+                 + "; ".join(f"{d['nombre']} ({d['degree']})" for d in g["duplicados"]) + " |")
+    L += ["", "## Grupos dudosos", ""]
+    L += ([f"- **{g['canonico']['nombre']}** ← "
+           f"{', '.join(d['nombre'] for d in g['duplicados'])}: {razon}"
+           for g, razon in dudosos[:60]]
+          or ["Ninguno que la revision automatica marque."])
+    if len(dudosos) > 60:
+        L += ["", f"(y {len(dudosos) - 60} mas en el JSON del plan)"]
+    L += ["", "## Como se aplica", "",
+          "```", "# NEO4J_URI del Secret Manager. SNAPSHOT DE LA VM ANTES: borra nodos.",
+          "py -3.13 dedup_entities.py            # este informe, sin escribir",
+          "py -3.13 dedup_entities.py --aplicar  # escribe", "```", ""]
+    return "\n".join(L) + "\n"
 
-    total = {"groups": len(groups), "deleted": 0, "menciona": 0, "rels": 0}
-    processed = 0
 
-    for key, nodes in groups.items():
-        canon = pick_canonical(nodes)
-        dups = [n for n in nodes if n["eid"] != canon["eid"]]
-
-        if not execute:
-            dup_names = [d["nombre"] for d in dups]
-            print(f"    {canon['nombre']}  <-  {dup_names}")
-            total["deleted"] += len(dups)
-            continue
-
-        try:
-            stats = merge_group_batch(canon, dups, label)
-            total["deleted"] += stats["deleted"]
-            total["menciona"] += stats["menciona"]
-            total["rels"] += stats["rels_out"] + stats["rels_in"]
-            processed += 1
-
-            if processed % 50 == 0:
-                print(f"    [{processed}/{len(groups)}] {total['deleted']} eliminados")
-
-        except Exception as e:
-            print(f"    ERROR en grupo '{key}': {str(e)[:80]}")
-            continue
-
-    return total
+def cargar_checkpoint() -> dict:
+    if CHECKPOINT_FILE.exists():
+        return json.loads(CHECKPOINT_FILE.read_text(encoding="utf-8"))
+    return {"claves_hechas": []}
 
 
-def main():
-    execute = "--execute" in sys.argv
-    target_label = None
-    if "--label" in sys.argv:
-        idx = sys.argv.index("--label")
-        target_label = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
+def guardar_checkpoint(datos: dict) -> None:
+    CHECKPOINT_FILE.write_text(json.dumps(datos, ensure_ascii=False, indent=1), encoding="utf-8")
 
-    labels = [target_label] if target_label else ENTITY_LABELS
-    mode = "EXECUTE" if execute else "DRY-RUN"
 
-    # Load checkpoint
-    checkpoint = load_checkpoint()
-    if execute and not target_label:
-        completed = checkpoint.get("completed_labels", [])
-        remaining = [l for l in labels if l not in completed]
-        if completed:
-            print(f"  Retomando desde checkpoint. Ya completados: {completed}")
-            labels = remaining
+def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")
+    if bitacora:
+        bitacora.configurar()
+    else:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--aplicar", "--execute", action="store_true", dest="aplicar",
+                    help="ESCRIBE EN EL GRAFO. Sin esto, informe.")
+    ap.add_argument("--label", default=None, help="un solo label")
+    ap.add_argument("--parte", default=None,
+                    help=f"default: docs/E-dedup-acentos-{date.today().isoformat()}.md")
+    args = ap.parse_args()
 
-    print(f"\n{'='*60}")
-    print(f"  DEDUP FASE 1 v2: Normalización de acentos [{mode}]")
-    print(f"  Labels a procesar: {labels}")
-    print(f"{'='*60}\n")
+    labels = [args.label] if args.label else ENTITY_LABELS
+    entidades = censo(run_query, labels)
+    grupos = grupos_de(entidades)
+    nodos = sum(len(g["duplicados"]) for g in grupos)
+    log.info(f"{len(entidades)} entidades leidas · {len(grupos)} grupos por acentos · "
+             f"{nodos} nodos que desaparecen")
 
-    grand_total = {"groups": 0, "deleted": 0, "menciona": 0, "rels": 0}
+    salida = RAIZ / "eval" / "resultados" / f"dedup-acentos-{date.today().isoformat()}.json"
+    salida.parent.mkdir(parents=True, exist_ok=True)
+    salida.write_text(json.dumps({"fecha": date.today().isoformat(), "aplicado": args.aplicar,
+                                  "entidades": len(entidades), "grupos": grupos},
+                                 ensure_ascii=False, indent=1), encoding="utf-8")
+    md = Path(args.parte) if args.parte else RAIZ / "docs" / "E-dedup-acentos-22sep.md"
+    md.write_text(parte(grupos, args.aplicar, len(entidades)), encoding="utf-8")
+    log.info(f"plan: {salida.relative_to(RAIZ)} · parte: {md.relative_to(RAIZ)}")
 
-    for label in labels:
-        print(f"--- {label} ---")
-        t0 = time.time()
+    if not args.aplicar:
+        log.info("DRY-RUN: no se escribio NADA en el grafo. Con --aplicar se funde.")
+        return
 
-        try:
-            stats = dedup_label(label, execute=execute)
-        except Exception as e:
-            print(f"  FATAL en {label}: {str(e)[:100]}")
-            print(f"  Guardando checkpoint y saliendo...")
-            save_checkpoint(checkpoint)
-            sys.exit(1)
+    hechas = set(cargar_checkpoint().get("claves_hechas", []))
+    pendientes = [g for g in grupos if g["clave"] not in hechas]
+    if hechas:
+        log.info(f"retomando desde checkpoint: {len(hechas)} grupos ya hechos")
+    with get_driver() as driver:
+        transaccion = fusion.transaccion_con(driver, DATABASE)
 
-        elapsed = time.time() - t0
+        def avisar(k, g):
+            hechas.add(g["clave"])
+            if k % 100 == 0:
+                guardar_checkpoint({"claves_hechas": sorted(hechas)})
+                log.info(f"  [{k}/{len(pendientes)}] {len(hechas)} grupos fundidos")
 
-        for k in grand_total:
-            grand_total[k] += stats[k]
-
-        if stats["groups"] == 0:
-            print("  Sin duplicados por acentos")
-        else:
-            print(f"  {stats['groups']} grupos, {stats['deleted']} nodos eliminados" +
-                  (f", {stats['menciona']} MENCIONA, {stats['rels']} rels ({elapsed:.1f}s)" if execute else ""))
-
-        # Save checkpoint per label
-        if execute:
-            checkpoint["completed_labels"] = checkpoint.get("completed_labels", []) + [label]
-            checkpoint["stats"] = checkpoint.get("stats", {})
-            checkpoint["stats"][label] = stats
-            save_checkpoint(checkpoint)
-            print(f"  Checkpoint guardado.")
-
-        print()
-
-    # Resumen
-    print(f"{'='*60}")
-    print(f"  RESUMEN {'(ejecutado)' if execute else '(dry-run)'}")
-    print(f"{'='*60}")
-    print(f"  Grupos duplicados: {grand_total['groups']}")
-    print(f"  Nodos {'eliminados' if execute else 'a eliminar'}: {grand_total['deleted']}")
-    if execute:
-        print(f"  MENCIONA transferidas: {grand_total['menciona']}")
-        print(f"  Relaciones transferidas: {grand_total['rels']}")
-
-        # Limpiar checkpoint al terminar
-        if os.path.exists(CHECKPOINT_FILE):
-            os.remove(CHECKPOINT_FILE)
-            print("  Checkpoint limpiado (todo completado).")
-
-    print()
+        total = aplicar(pendientes, run_query, transaccion, avisar=avisar)
+    guardar_checkpoint({"claves_hechas": sorted(hechas)})
+    log.info(f"aplicado: {total['grupos']} grupos, {total['nodos']} nodos borrados, "
+             f"{total['fallados']} fallados")
+    if not total["fallados"]:
+        os.remove(CHECKPOINT_FILE)
+        log.info("checkpoint limpiado (todo completado)")
 
 
 if __name__ == "__main__":
