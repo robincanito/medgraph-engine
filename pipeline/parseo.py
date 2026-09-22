@@ -1512,6 +1512,12 @@ def _compilar_patrones(patrones: list, plegar: bool) -> list:
     sirve donde el patrón nombra una PALABRA (capítulo, sección, parte) —que es el caso del
     off-by-one que esta tanda vino a curar, `CAPITULO 268`—; donde la caja ES el criterio, lo
     destruye.
+
+    LA MITAD QUE FALTABA DEL MISMO ARGUMENTO ESTÁ EN `_es_titulo_de_capitulo` (R6.a, 22-sep-2026).
+    Plegar el patrón de capítulo no destruye la regla como en sección, pero sí abre una puerta que
+    nadie midió: `^Capítulo\\s+\\d+` con `IGNORECASE` matchea **cualquier línea de prosa que
+    empiece con la palabra**. El plegado se conserva —era el encargo— y la guarda decide si la línea
+    ES el encabezado o sólo arranca con su palabra.
     """
     compilados = []
     for patron in patrones:
@@ -1525,6 +1531,121 @@ def _compilar_patrones(patrones: list, plegar: bool) -> list:
             log.warning("el patrón %r no se puede plegar (%s): queda sólo la forma exacta",
                         patron, e)
     return compilados
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# LA LÍNEA **ES** EL ENCABEZADO, O SÓLO EMPIEZA CON SU PALABRA (R6.a, 22-sep-2026;
+# docs/E-R6-reparseo-22sep.md §6.2 y §11).
+#
+# QUÉ SE ROMPIÓ EL 18-SEP. `_compilar_patrones(plegar=True)` agregó la variante sin tildes con
+# `IGNORECASE` para que `CAPITULO 268` entrara por `^CAPÍTULO\s+\d+`. Efecto no buscado: toda línea
+# de prosa que ARRANQUE con «capítulo», «sección» o «parte» pasa a ser título de capítulo —y son
+# frecuentes, porque el salto de línea parte las referencias cruzadas justo ahí: «(v.» queda arriba
+# y «capítulo 7).» abre el renglón siguiente—. `current_capitulo = clean_cap[:120]` se queda con el
+# pedazo de oración y lo arrastra hasta el próximo encabezado que matchee. MEDIDO el 22-sep: re-
+# parsear CIE-10 daba 406 títulos imposibles de 444 chunks, y Robbins ponía «capítulo 7.» sobre 961
+# de 5.002 —páginas que hoy están bien—.
+#
+# EL CRITERIO SE ELIGIÓ MIDIENDO, sobre las líneas que matchean un patrón de capítulo en los tres
+# libros del informe (CIE-10, Planificación de hospitales, Robbins: 109 líneas, 26 de ellas prosa).
+# La vara no es el largo ni la caja del rótulo, y las dos se descartaron con evidencia:
+#   · EL LARGO NO SEPARA. `capítulo 18. SÍNTOMAS, SIGNOS Y RESULTADOS ANORMALES DE PRUEBAS
+#     COMPLEMENTARIAS,` (prosa) mide 79 caracteres y `CAPÍTULO 3.- ENFERMEDADES DE LA SANGRE Y
+#     ÓRGANOS HEMATOPOYÉTICOS Y TRASTORNOS QUE` (encabezado de verdad, CIE-10) mide 80. Cualquier
+#     techo que frene a la primera se come al segundo.
+#   · «QUE EMPIECE EN MAYÚSCULA» —lo que propone §9 opción 3.1 del informe— separa las 109 líneas
+#     sin un error, pero rompe lo que T5 vino a arreglar: `capítulo 268` en minúscula tiene que
+#     seguir entrando, y hay un test del 18-sep que lo fija. La caja del rótulo entra igual, pero
+#     como AGRAVANTE (tercera condición), no como condición única.
+# Lo que separa es LO QUE SIGUE AL NÚMERO, en tres formas. Las tres juntas rechazan las 26 líneas
+# de prosa medidas y no tocan ninguno de los 83 encabezados.
+#
+# DÓNDE SE APLICA: a los patrones de CAPÍTULO, sobre la misma forma de la línea contra la que el
+# patrón matcheó (la plegada si matcheó plegado). Vale entonces para TODOS los patrones de esa
+# lista —capítulo, sección, parte, y lo que declare un perfil (`título`, `libro`, `unidad`)—, que es
+# la respuesta a «¿el mismo defecto entra por otro patrón?»: entra por los cuatro del `_default`
+# (medido: `^CAPÍTULO\s+\d+` y `^SECCIÓN\s+[IVXLCDM]+` producen prosa en los tres libros), y la
+# guarda vive en el match, no en el patrón, así que los cubre a todos sin editar un solo YAML.
+#
+# LO QUE ESTA GUARDA **NO** CURA, dicho para que nadie lo redescubra: el índice que siembra el
+# capítulo (§4 del informe, opción 3.2). `Capítulo 12. Servicios y dependencias no médicas ........`
+# es una línea del sumario y es, por forma, un encabezado perfecto: rótulo capitalizado, número,
+# punto y título en mayúscula. Pasa la guarda con razón y sigue arrastrándose 372 páginas. Eso se
+# cura mirando la NATURALEZA del bloque (`naturaleza_por_linea`), no la línea.
+
+#: Una letra, en cualquier idioma (sin dígitos ni `_`, que `\w` incluye).
+LETRA = re.compile(r"[^\W\d_]")
+#: EL PARÉNTESIS QUE CIERRA, pegado al número: es el «(v. capítulo 7)» y NUNCA es un encabezado,
+#: cualquiera sea la caja del rótulo. Medido en el grafo el 22-sep: los 246 chunks cuyo título de
+#: capítulo lleva un `)` ahí están todos en un solo libro (`ablacion-…-guia-calidad-organos-
+#: trasplante`) y son todos referencias cruzadas —«Capítulo 5). También se puede considerar la do­»,
+#: 83 chunks—. Ni un encabezado de verdad en 47.510 chunks con capítulo. Éste es además un defecto
+#: que PREDATA el plegado del 18-sep: entró por el patrón exacto, porque su rótulo va capitalizado.
+PARENTESIS_DE_REFERENCIA = ")"
+#: LA PUNTUACIÓN DE ORACIÓN pegada al número. Condena sólo cuando el rótulo viene en minúscula, y
+#: eso está medido: en el grafo hay 522 chunks cuyo título legítimo es un rótulo desnudo terminado
+#: en punto —`Capítulo 12.`, `Capítulo 6.`… de `sina-up2-actualizacion-vacunas-2023` (476) y de
+#: `ablacion-…-guia-calidad-organos-trasplante` (46)—, con el título en el renglón siguiente. Una
+#: regla que condenara el punto final sin mirar la caja los borraría todos.
+PUNTUACION_DE_ORACION = ".,;"
+
+
+def _es_titulo_de_capitulo(linea: str, fin: int) -> bool:
+    """`linea` es un encabezado de capítulo, o prosa que empieza con su palabra?
+
+    Args:
+        linea: la línea contra la que el patrón matcheó (la plegada, si matcheó plegado: por eso
+            los índices son de ESA forma y no de la original).
+        fin: dónde terminó el match, o sea dónde termina el rótulo con su número.
+
+    Returns:
+        True si la línea se puede tomar como título.
+
+    ES PURA: recibe una línea y un índice, devuelve un bool. No sabe de qué libro es.
+
+    LAS TRES CONDICIONES, cada una con la línea real que la pagó y con cuántas de las 26 líneas de
+    prosa medidas frena. El reparto es en el ORDEN EN QUE CORREN (1 → 3 → 2), que es por qué la
+    última parece la menos productiva: `capítulo 7, las enfermedades genéticas…` cae por la coma
+    antes de que nadie mire la minúscula. Ninguna es prescindible: ver la 2.
+
+      1. EL RÓTULO TERMINA DONDE TERMINA UNA PALABRA. `^SECCIÓN\\s+[IVXLCDM]+` plegado matchea
+         «sección **d**eben hacerse un poco más amplias…» —la `d` de «deben» es un número romano
+         válido— y deja el match en mitad de la palabra. Un patrón que corta una palabra por la
+         mitad no reconoció nada. (5: una de CIE-10, tres de Planificación, una de Robbins.)
+      3. EL NÚMERO NO LLEVA PEGADO EL CIERRE DE UNA REFERENCIA CRUZADA. Dos varas, y la diferencia
+         está medida contra el grafo (ver las constantes): el PARÉNTESIS que cierra condena siempre
+         —«Capítulo 5). También se puede considerar la do­», 246 chunks del grafo, ninguno un
+         encabezado—; el PUNTO (y la coma, y el punto y coma) condenan sólo si el rótulo viene en
+         minúscula, porque `Capítulo 12.` con su título en el renglón siguiente es un encabezado de
+         verdad y hay 522 chunks así. Con esa gradación caen «capítulo 7.», «capítulo 15.» y los
+         «capítulo 6. Aquí nos centramos…» de Robbins, y sobrevive `capitulo 268 Infeccion urinaria`,
+         el caso en minúscula que T5 fijó con un test. (18: tres de CIE-10, una de Planificación,
+         catorce de Robbins — es la mitad del defecto.)
+      2. LO QUE SIGUE AL NÚMERO NO EMPIEZA EN MINÚSCULA. Un encabezado nombra su capítulo: después
+         del número viene un título —mayúscula o caja alta— o no viene nada. (3, y son las que más
+         importan: una es «capítulo 1 **t**ienen prioridad sobre los códigos de otros capítulos para
+         una misma condición», el título que cubría 184 de los 444 chunks de CIE-10. Sin esta
+         condición el 406 baja a ~184, no a 0.)
+
+    EL LADO BARATO DEL ERROR, elegido a propósito: si esta guarda rechaza un encabezado de verdad
+    (un título envuelto que quedó cortado en una coma, un rótulo en minúscula con punto), el capítulo
+    anterior se sigue arrastrando. Eso es GRUESO —pierde precisión— pero no MIENTE, y es la
+    distinción de §3 del informe. Aceptar la prosa, en cambio, escribe una cita falsa que además
+    viaja en el texto que se embebe (`build_embedding_text`) y corre el vector.
+    """
+    resto = linea[fin:]
+    # 1. el match no puede terminar en mitad de una palabra
+    if LETRA.match(resto[:1]):
+        return False
+    # 3. el cierre de una referencia cruzada pegado al número
+    cierre = resto.lstrip()[:1]
+    if cierre == PARENTESIS_DE_REFERENCIA:
+        return False
+    if linea[:1].islower() and cierre and cierre in PUNTUACION_DE_ORACION:
+        return False
+    # 2. la primera letra de lo que sigue: mayúscula (título) o nada
+    primera = LETRA.search(resto)
+    return not (primera and primera.group(0).islower())
 
 
 def _variantes_de_linea(linea: str) -> list:
@@ -1611,16 +1732,29 @@ def detect_structure(pages: list, libro_id: str, estrategia: Estrategia = POR_DE
     `ENCABEZADO_PARTIDO` arriba para la lista y `_compilar_patrones` / `_variantes_de_linea` /
     `_unir_encabezados_partidos` para cada mitad. El TÍTULO QUE SE GUARDA ES SIEMPRE EL ORIGINAL
     —con sus tildes y su caja—: lo plegado es la vara con que se DECIDE, nunca lo que viaja.
+
+    Y EL SEXTO CAMINO, QUE EL QUINTO ABRIÓ: la línea que sólo EMPIEZA con la palabra «capítulo».
+    Lo decide `_es_titulo_de_capitulo` (R6.a, 22-sep-2026), la guarda que `matchea` aplica a los
+    patrones de capítulo. Sin ella el plegado del 18-sep convertía en título cualquier referencia
+    cruzada partida por el salto de línea: medido, 406 títulos imposibles de 444 chunks en CIE-10.
     """
     # Los patrones son del DOMINIO (pipeline/estrategia.py), no de este archivo.
     patterns = estrategia.patrones_de(libro_id)
     cap_patterns = _compilar_patrones(patterns["capitulo"], plegar=True)
     sec_patterns = _compilar_patrones(patterns["seccion"], plegar=False)
 
-    def matchea(compilados: list, variante: str, plegada: str):
-        """La variante si alguno de los patrones la matchea (sobre su propia forma), o None."""
+    def matchea(compilados: list, variante: str, plegada: str, guarda=None):
+        """La variante si alguno de los patrones la matchea (sobre su propia forma), o None.
+
+        `guarda` mira la línea DESPUÉS del match, sobre la misma forma contra la que se matcheó
+        —la plegada si el patrón era el plegado— y puede rechazarla: es `_es_titulo_de_capitulo`
+        (R6.a), que separa el encabezado de la prosa que empieza con su palabra. Un patrón
+        rechazado no corta la vuelta: otro de la lista puede matchear más largo y sí ser un título.
+        """
         for pat, sobre_plegado in compilados:
-            if pat.match(plegada if sobre_plegado else variante):
+            forma = plegada if sobre_plegado else variante
+            m = pat.match(forma)
+            if m and (guarda is None or guarda(forma, m.end())):
                 return variante
         return None
 
@@ -1648,7 +1782,7 @@ def detect_structure(pages: list, libro_id: str, estrategia: Estrategia = POR_DE
             # Detectar capítulo
             is_capitulo = False
             for variante, plegada in variantes:
-                encabezado = matchea(cap_patterns, variante, plegada)
+                encabezado = matchea(cap_patterns, variante, plegada, _es_titulo_de_capitulo)
                 if encabezado is None:
                     continue
                 # Limpiar: reconstruir texto con espacios intercalados
