@@ -298,6 +298,17 @@ def borrar_libro(query, write, libro_id: str, dry_run: bool = False, lote: int =
     }
     if dry_run:
         return preview
+    # LA PROCEDENCIA DE LAS ARISTAS SE VA CON EL LIBRO (22-sep-2026, R1). Los chunks se borran
+    # abajo con `DETACH DELETE`, asi que sus `MENCIONA` desaparecen solas; las aristas entre
+    # entidades NO cuelgan de los chunks —son (entidad)-[X]->(entidad)— y se quedarian con
+    # entradas de procedencia apuntando a fragmentos que ya no existen. Eso las volveria
+    # INMORTALES: nadie va a volver a cargar ese fragmento, asi que ningun reemplazo futuro
+    # podria sacarles esa entrada. Se purga antes de borrar nada, con `todos=True`.
+    from pipeline import extraccion, perfiles
+    tx = perfiles.taxonomia()
+    for tipo_rel in tx.relaciones:
+        for cypher in extraccion.cypher_purga_relaciones(tipo_rel):
+            write(cypher, {"libro": libro_id, "chunks": [], "todos": True})
     for cypher in (CYPHER_BORRAR_CHUNKS_LOTE, CYPHER_BORRAR_PARENTS_LOTE):
         while query(cypher, {"lid": libro_id, "lote": lote})[0]["borrados"] > 0:
             pass

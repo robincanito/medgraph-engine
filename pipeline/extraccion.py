@@ -1005,8 +1005,37 @@ def cabecera_de_checkpoint(tx: Taxonomia, libro_id: str, model_id: str) -> dict:
 # LA CANONICALIZACION
 # ══════════════════════════════════════════════════════════════════════════════════════
 
-def canonicalizar(tx: Taxonomia, extracciones: list) -> tuple:
+def chunks_de(extracciones: list) -> list:
+    """Los ids de los fragmentos que ESTE artefacto cubre, en orden y sin repetir.
+
+    ES EL ALCANCE DEL REEMPLAZO (R1, 22-sep-2026) y por eso no se deduce de las entidades ni de
+    las relaciones: un fragmento que con `medicina@6` no deja NADA tiene que borrar igual lo que
+    habia dejado con `@2`, y ese fragmento no aparece en ninguna de las dos listas. El unico
+    lugar donde consta que se lo re-extrajo es la lista de `extractions` del artefacto.
+    """
+    vistos, salida = set(), []
+    for ext in extracciones:
+        cid = ext.get("chunk_id") or ""
+        if cid and cid not in vistos:
+            vistos.add(cid)
+            salida.append(cid)
+    return salida
+
+
+def canonicalizar(tx: Taxonomia, extracciones: list, *, perfil: str | None = None) -> tuple:
     """Las menciones de todos los chunks, consolidadas en un set canonico de entidades.
+
+    CADA RELACION SALE CON SU PROCEDENCIA (R1, 22-sep-2026, `docs/DISENO-procedencia-22sep.md`).
+    Hasta hoy esta funcion se quedaba con las tres claves —`desde`, `relacion`, `hasta`— y tiraba
+    de que fragmento venia cada afirmacion y la `evidencia` que `medicina@5` habia pagado, medido
+    y verificado. Sin eso el grafo no sabe de donde salio ninguna de sus 204.000 aristas y
+    recargar un fragmento SUMA a lo viejo en vez de reemplazarlo. Ahora cada relacion lleva
+    `procedencia`: una entrada por fragmento que la afirma, con `chunk`, `libro`, `perfil` y
+    `evidencia`. `cargar` las escribe en la arista.
+
+    `perfil` pisa el `tx.perfil` para el linaje, y hay que pasarlo cuando se carga un artefacto
+    LEIDO DE DISCO: lo que hay que anotar en la arista es el perfil que PRODUJO la extraccion
+    (`profile` del artefacto), no el que esta activo en la instancia que la sube.
 
     Dos cosas salen del perfil y antes eran literales:
 
@@ -1066,15 +1095,29 @@ def canonicalizar(tx: Taxonomia, extracciones: list) -> tuple:
                     for s in ent.get("sinonimos") or []:
                         sinonimo_de[s] = nombre
 
-    vistas, relaciones = set(), []
+    vistas, relaciones = {}, []
     for ext in extracciones:
+        chunk_id = ext.get("chunk_id", "")
+        libro = ext.get("libro_id") or ""
         for rel in ext.get("relaciones") or []:
             desde = sinonimo_de.get(rel["desde"], rel["desde"])
             hasta = sinonimo_de.get(rel["hasta"], rel["hasta"])
             clave = (desde, rel["relacion"], hasta)
-            if clave not in vistas:
-                vistas.add(clave)
-                relaciones.append({"desde": desde, "relacion": rel["relacion"], "hasta": hasta})
+            fila = vistas.get(clave)
+            if fila is None:
+                fila = {"desde": desde, "relacion": rel["relacion"], "hasta": hasta,
+                        "procedencia": []}
+                vistas[clave] = fila
+                relaciones.append(fila)
+            # UN FRAGMENTO, UNA PROCEDENCIA (R1, 22-sep-2026). Si el mismo chunk afirma dos veces
+            # la misma tripleta, la segunda no agrega linaje: agregaria una entrada que despues
+            # habria que sacar dos veces al reemplazar, y las cuatro listas de la arista tienen
+            # que quedar alineadas posicion a posicion.
+            if any(p["chunk"] == chunk_id for p in fila["procedencia"]):
+                continue
+            fila["procedencia"].append({
+                "chunk": chunk_id, "libro": libro, "perfil": perfil or tx.perfil,
+                "evidencia": str(rel.get("evidencia") or "")[:MAX_EVIDENCIA]})
 
     salida = []
     for ent in entidades.values():
@@ -1090,6 +1133,29 @@ def canonicalizar(tx: Taxonomia, extracciones: list) -> tuple:
 
 LOTE = 200
 
+#: LAS CUATRO LISTAS DE LA ARISTA (R1, 22-sep-2026, `docs/DISENO-procedencia-22sep.md`). Son
+#: PARALELAS: la entrada `i` de las cuatro habla del MISMO fragmento. `chunks` es la clave del
+#: reemplazo —y por eso no se acota nunca—, `libros` y `perfiles` dicen de que fuente y con que
+#: perfil entro esa afirmacion, y `evidencias` es la oracion que la sostiene.
+CLAVES_PROCEDENCIA = ("chunks", "libros", "perfiles", "evidencias")
+
+#: CUANTAS EVIDENCIAS SE GUARDAN POR ARISTA, y el numero sale de medir y no de estimar (22-sep):
+#: en `extracted-etapa0/` —798 chunks de cuatro libros, `medicina@6`— la arista mas afirmada lo
+#: es por 4 fragmentos, la mediana por 1, ninguna llega a 13; la evidencia mide 72 caracteres de
+#: mediana y 240 de maximo (el tope del contrato). O sea que este tope NO muerde en la practica
+#: y esta para el caso patologico: una arista que cien fragmentos afirmen guardaria 24 KB de
+#: texto en una sola propiedad. Pasado el tope la entrada existe igual, con la evidencia VACIA:
+#: las cuatro listas siguen alineadas y `chunks` sigue COMPLETO, que es lo unico que el
+#: reemplazo necesita para ser exacto.
+TOPE_EVIDENCIAS = 12
+
+#: LA MARCA DE LO HEREDADO (R1). El discriminador de verdad es `e.chunks IS NULL` —no hace falta
+#: escribir nada en el grafo para saber cual arista es vieja—; esta marca es OPCIONAL, la pone el
+#: guion de limpieza con su fecha, y la carga la SACA cuando una extraccion nueva vuelve a
+#: afirmar esa arista: la adopcion. Una arista adoptada deja de ser heredada porque ya hay un
+#: fragmento que la sostiene.
+MARCA_HEREDADA = "heredado"
+
 
 def cypher_entidades(tx: Taxonomia, label: str) -> str:
     """El MERGE de un lote de entidades de un label. La propiedad del nombre sale del perfil
@@ -1104,8 +1170,130 @@ def cypher_entidades(tx: Taxonomia, label: str) -> str:
             f"                    e.fuente_libro = ent.libro_id\n                ")
 
 
+def cypher_relaciones(tx: Taxonomia, desde_label: str, tipo_rel: str, hasta_label: str) -> str:
+    """El MERGE de un lote de aristas de un mismo (label, tipo, label), CON PROCEDENCIA.
+
+    Era `MERGE (a)-[:TIPO]->(b)` y nada mas: `keys(r) = []` para las 204.000 relaciones del
+    grafo, medido el 21-sep. Lo que agrega (R1, 22-sep-2026):
+
+      · las cuatro listas paralelas de `CLAVES_PROCEDENCIA`, con una entrada por fragmento;
+      · IDEMPOTENCIA POR FRAGMENTO: antes de concatenar saca de la arista las entradas de los
+        fragmentos que vienen en este lote, asi que cargar dos veces lo mismo deja lo mismo y
+        no una lista con todo repetido. Las entradas de OTROS fragmentos no se tocan: una
+        arista que dos libros afirman no pierde la mitad porque se recargo uno;
+      · `REMOVE e.origen`: la ADOPCION. Una arista heredada que esta extraccion vuelve a
+        afirmar deja de ser heredada, y por eso despues de re-extraer el corpus lo que siga sin
+        `chunks` es exactamente lo que ninguna extraccion actual sostiene.
+
+    El tope de `evidencias` se aplica aca y no en Python porque la lista CRECE entre cargas: lo
+    que hay que acotar es el acumulado, no lo que aporta este lote.
+    """
+    np = tx.name_property
+    return (
+        "\n                UNWIND $batch AS r\n"
+        f"                MATCH (a:{desde_label} {{{np}: r.desde}})\n"
+        f"                MATCH (b:{hasta_label} {{{np}: r.hasta}})\n"
+        f"                MERGE (a)-[e:{tipo_rel}]->(b)\n"
+        "                WITH e, r, [i IN range(0, size(coalesce(e.chunks, [])) - 1)\n"
+        "                            WHERE NOT e.chunks[i] IN r.chunks] AS quedan\n"
+        "                WITH e, r,\n"
+        "                     [i IN quedan | e.chunks[i]] + r.chunks         AS nc,\n"
+        "                     [i IN quedan | e.libros[i]] + r.libros         AS nl,\n"
+        "                     [i IN quedan | e.perfiles[i]] + r.perfiles     AS nf,\n"
+        "                     [i IN quedan | e.evidencias[i]] + r.evidencias AS ne\n"
+        "                SET e.chunks = nc, e.libros = nl, e.perfiles = nf,\n"
+        "                    e.evidencias = [i IN range(0, size(ne) - 1)\n"
+        "                                    | CASE WHEN i < $tope THEN ne[i] ELSE '' END]\n"
+        "                REMOVE e.origen, e.marcado_el\n                ")
+
+
+def cypher_relaciones_pelado(tx: Taxonomia, desde_label: str, tipo_rel: str,
+                             hasta_label: str) -> str:
+    """El MERGE DE SIEMPRE, sin tocar la procedencia. Es el camino de una relacion que llega SIN
+    linaje —armada a mano, o de un artefacto que no paso por `canonicalizar`—.
+
+    POR QUE NO SE LE INVENTA UNA PROCEDENCIA VACIA. Una arista con `chunks: []` mentiria dos
+    veces: diria que tiene linaje (`chunks IS NOT NULL`) y ningun fragmento la podria reemplazar
+    nunca, porque no hay entrada que sacarle. La invariante que vale la pena sostener es
+    `chunks IS NULL` <=> "no se sabe de donde salio", y esta funcion la respeta. Si la arista ya
+    existia con procedencia, este MERGE no se la toca.
+    """
+    np = tx.name_property
+    return (f"\n                UNWIND $batch AS r\n"
+            f"                MATCH (a:{desde_label} {{{np}: r.desde}})\n"
+            f"                MATCH (b:{hasta_label} {{{np}: r.hasta}})\n"
+            f"                MERGE (a)-[:{tipo_rel}]->(b)\n                ")
+
+
+def procedencia_en_lista(procedencia, libro_id: str, tx: Taxonomia) -> dict:
+    """Las entradas de `canonicalizar` pasadas a las cuatro listas PARALELAS de la arista.
+
+    El libro y el perfil de una entrada que no los trae se completan con los de la corrida: un
+    artefacto viejo no escribia `libro_id` por extraccion, y es preferible anotar el libro que
+    se esta cargando —que es cierto— a dejar la entrada sin fuente. Sin procedencia devuelve
+    `{}` y el llamador usa el MERGE pelado.
+    """
+    if not procedencia:
+        return {}
+    listas: dict = {clave: [] for clave in CLAVES_PROCEDENCIA}
+    for p in procedencia:
+        listas["chunks"].append(p.get("chunk") or "")
+        listas["libros"].append(p.get("libro") or libro_id)
+        listas["perfiles"].append(p.get("perfil") or tx.perfil)
+        listas["evidencias"].append(p.get("evidencia") or "")
+    return listas
+
+
+def cypher_purga_relaciones(tipo_rel: str) -> tuple:
+    """Las DOS sentencias que le sacan a las aristas lo que aportaron ciertos fragmentos.
+
+    Van en este orden y son dos porque Cypher no borra condicionalmente sin APOC:
+
+      1. la arista cuyos fragmentos son TODOS del lote que se recarga se va entera (si la
+         extraccion nueva la vuelve a afirmar, el MERGE la crea de nuevo un paso despues);
+      2. la que ademas tiene fragmentos de afuera solo pierde las entradas del lote.
+
+    EL PREFILTRO ES EL LIBRO, y no es cosmetico: `$chunks` puede tener 13.000 ids (Farreras) y
+    `x IN $chunks` es lineal, asi que sin el `WITH` que fuerza el orden se evaluaria contra cada
+    arista del tipo. Con el prefiltro solo se paga sobre las aristas que ya nombran a este libro.
+
+    `$todos` en true ignora `$chunks` y saca TODO lo que este libro habia aportado. Lo usa el
+    borrado de una fuente (`carga.borrar_libro`): ahi los fragmentos se van del grafo, y una
+    entrada que apunta a un chunk que ya no existe volveria inmortal a la arista —ningun
+    reemplazo futuro podria sacarsela, porque nadie va a volver a cargar ese fragmento—.
+    """
+    # La entrada `i` se purga si es DE ESTE LIBRO y (se borra el libro entero, o su fragmento
+    # esta en el lote que se recarga). Nombrar el libro y no solo el chunk hace la regla
+    # explicita en vez de depender de que el id del chunk lleve adentro el del libro.
+    purgada = ("e.libros[i] = $libro AND ($todos OR e.chunks[i] IN $chunks)")
+    indices = "range(0, size(coalesce(e.chunks, [])) - 1)"
+    prefijo = (f"\n                MATCH ()-[e:{tipo_rel}]->()\n"
+               "                WHERE $libro IN coalesce(e.libros, [])\n"
+               "                WITH e\n")
+    borrar = (prefijo +
+              f"                WHERE all(i IN {indices} WHERE {purgada})\n"
+              "                DELETE e\n                ")
+    podar = (prefijo +
+             f"                WHERE any(i IN {indices} WHERE {purgada})\n"
+             f"                WITH e, [i IN {indices} WHERE NOT ({purgada})] AS quedan\n"
+             "                SET e.chunks = [i IN quedan | e.chunks[i]],\n"
+             "                    e.libros = [i IN quedan | e.libros[i]],\n"
+             "                    e.perfiles = [i IN quedan | e.perfiles[i]],\n"
+             "                    e.evidencias = [i IN quedan | e.evidencias[i]]\n                ")
+    return borrar, podar
+
+
+#: Las `MENCIONA` de los fragmentos que se recargan. Se borran antes de volver a escribirlas: un
+#: fragmento que con el perfil nuevo ya no nombra a una entidad no puede seguir apuntandola.
+#: No hace falta procedencia en este arco porque el chunk ES el extremo de origen.
+CYPHER_PURGA_MENCIONA = (
+    "\n                UNWIND $batch AS cid\n"
+    "                MATCH (c:Chunk {id: cid})-[m:MENCIONA]->()\n"
+    "                DELETE m\n                ")
+
+
 def cargar(write, tx: Taxonomia, entidades: list, relaciones: list, libro_id: str,
-           *, dev_mode: bool = False) -> dict:
+           *, dev_mode: bool = False, chunks: list | None = None) -> dict:
     """Sube entidades, `MENCIONA` y relaciones al grafo. DEVUELVE LAS VIOLACIONES.
 
     El `except Exception: print(...)` por lote del codigo viejo se tragaba los errores de
@@ -1116,10 +1304,35 @@ def cargar(write, tx: Taxonomia, entidades: list, relaciones: list, libro_id: st
 
     `dev_mode` por defecto **False** (era True): el sufijo `Dev` escribe un grafo paralelo que
     ninguna consulta mira. Se conserva porque `promote_dev_entities` lo usa.
+
+    EL REEMPLAZO POR FRAGMENTO (R1, 22-sep-2026). Con `chunks` —la lista de fragmentos que el
+    artefacto cubre, o sea `chunks_de(extracciones)`— la carga SUSTITUYE lo que esos fragmentos
+    habian aportado en vez de sumarse a ello: borra sus `MENCIONA` y les saca a las aristas las
+    entradas de procedencia de esos fragmentos, borrando la arista que se queda sin ninguna.
+    Recien despues escribe lo nuevo. Correr la misma carga dos veces deja el grafo igual.
+
+    SIN `chunks` la conducta es la de siempre —aditiva—, y es a proposito: un llamador que no
+    sabe que fragmentos cubre su artefacto no puede afirmar que los esta reemplazando. Los tres
+    caminos de produccion (el CLI de `ingest.py`, los dos `--upload` de los extractores) SI lo
+    pasan, y hay un test que lo fija.
+
+    LO QUE EL REEMPLAZO NO HACE, dicho antes de que alguien lo suponga: no borra NODOS. Una
+    entidad que ningun fragmento vuelve a nombrar se queda sin `MENCIONA` y sin aristas, pero el
+    nodo sigue ahi. Borrar nodos es irreversible y puede alcanzar entidades que otra cosa del
+    grafo usa (`ES_UN` a ATC/SNOMED, los DAG); va en el guion de limpieza que corre una persona,
+    no en la ingesta.
     """
     sufijo = "Dev" if dev_mode else ""
     violaciones: list = []
     creadas = mencionadas = relacionadas = 0
+
+    def _escribir_purga(cypher, parametros, contexto):
+        try:
+            write(cypher, parametros)
+        except Exception as e:
+            violaciones.append({"contexto": contexto, "n": len(parametros.get("chunks") or
+                                                               parametros.get("batch") or []),
+                                "error": f"{type(e).__name__}: {str(e)[:200]}"})
 
     def _escribir(cypher, parametros, contexto):
         try:
@@ -1129,6 +1342,23 @@ def cargar(write, tx: Taxonomia, entidades: list, relaciones: list, libro_id: st
             violaciones.append({"contexto": contexto, "n": len(parametros.get("batch") or []),
                                 "error": f"{type(e).__name__}: {str(e)[:200]}"})
             return False
+
+    # ── EL REEMPLAZO, ANTES DE ESCRIBIR NADA ──────────────────────────────────────────
+    # Va primero y no despues por una razon que cuesta cara si se invierte: si se purgara
+    # DESPUES del MERGE, la purga se llevaria puesto lo que este mismo lote acaba de escribir
+    # (sus entradas tambien son "de estos fragmentos") y la carga terminaria con el grafo vacio.
+    if chunks:
+        for i in range(0, len(chunks), LOTE):
+            _escribir_purga(CYPHER_PURGA_MENCIONA, {"batch": chunks[i:i + LOTE]},
+                            "purga:MENCIONA")
+        # TODOS los tipos del perfil, no solo los que trae este artefacto: una arista que `@2`
+        # dejo de un tipo que `@6` ya no produce tambien es "lo que este fragmento habia dicho".
+        # El sufijo `Dev` es de los LABELS, no de los tipos de relacion (la carga nunca lo puso
+        # en la arista): la purga tiene que nombrar el mismo tipo que el MERGE.
+        for tipo_rel in tx.relaciones:
+            for cypher in cypher_purga_relaciones(tipo_rel):
+                _escribir_purga(cypher, {"libro": libro_id, "chunks": chunks, "todos": False},
+                                f"purga:{tipo_rel}")
 
     por_tipo: dict = {}
     for ent in entidades:
@@ -1179,20 +1409,81 @@ def cargar(write, tx: Taxonomia, entidades: list, relaciones: list, libro_id: st
     for rel in relaciones:
         desde_l = label_de_entidad.get(rel["desde"])
         hasta_l = label_de_entidad.get(rel["hasta"])
-        if desde_l and hasta_l:
-            grupos.setdefault((desde_l, rel["relacion"], hasta_l), []).append(
-                {"desde": rel["desde"], "hasta": rel["hasta"]})
+        if not (desde_l and hasta_l):
+            continue
+        listas = procedencia_en_lista(rel.get("procedencia"), libro_id, tx)
+        grupos.setdefault((desde_l, rel["relacion"], hasta_l, bool(listas)), []).append(
+            {"desde": rel["desde"], "hasta": rel["hasta"], **listas})
 
-    for (desde_l, tipo_rel, hasta_l), items in grupos.items():
-        cypher = (f"\n                UNWIND $batch AS r\n"
-                  f"                MATCH (a:{desde_l} {{{tx.name_property}: r.desde}})\n"
-                  f"                MATCH (b:{hasta_l} {{{tx.name_property}: r.hasta}})\n"
-                  f"                MERGE (a)-[:{tipo_rel}]->(b)\n                ")
+    for (desde_l, tipo_rel, hasta_l, con_linaje), items in grupos.items():
+        cypher = (cypher_relaciones(tx, desde_l, tipo_rel, hasta_l) if con_linaje
+                  else cypher_relaciones_pelado(tx, desde_l, tipo_rel, hasta_l))
         for i in range(0, len(items), LOTE):
             lote = items[i:i + LOTE]
-            if _escribir(cypher, {"batch": lote},
+            if _escribir(cypher, {"batch": lote, "tope": TOPE_EVIDENCIAS},
                          f"relaciones:{desde_l}-[{tipo_rel}]->{hasta_l}"):
                 relacionadas += len(lote)
 
     return {"entities": creadas, "menciona": mencionadas, "relations": relacionadas,
             "violaciones": violaciones}
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# LO HEREDADO — las aristas que se cargaron cuando la procedencia no existia
+# ══════════════════════════════════════════════════════════════════════════════════════
+#
+# EL PROBLEMA, dicho sin vueltas. Las 204.000 relaciones que el grafo tenia el 21-sep-2026 no
+# llevan ninguna propiedad, asi que NO SE PUEDEN ATRIBUIR A UN LIBRO: no hay dato que diga cual
+# de los 160 las produjo. El `fuente_libro` de la entidad es el ULTIMO libro que la cargo, no
+# todos; el vecindario no dice nada; el label tampoco. Por eso «re-extraer un libro y borrar las
+# relaciones sin procedencia DE ESE LIBRO» no se puede programar: la frase nombra un conjunto
+# que no existe en el grafo.
+#
+# LO QUE SI SE PUEDE, y es lo que estas funciones arman (`docs/DISENO-procedencia-22sep.md` §4):
+# una arista heredada se puede borrar cuando TODOS los libros que mencionan a alguno de sus dos
+# extremos ya volvieron a cargarse con procedencia. Razon: para que un libro X hubiera producido
+# esa arista, X tuvo que extraer al menos uno de los extremos en alguno de sus fragmentos, y eso
+# deja `(:Book X)-[:CONTAINS]->(:Chunk)-[:MENCIONA]->(extremo)`. Si todos esos libros ya pasaron
+# por la carga nueva y la arista SIGUE sin `chunks`, ninguna extraccion actual la sostiene.
+#
+# NADA DE ESTO CORRE SOLO. Son sentencias para el guion `testing/heredadas.py`, que las ejecuta
+# una persona con snapshot hecho; borrar es irreversible.
+
+
+def cypher_censo_procedencia(tipo_rel: str) -> str:
+    """Cuantas aristas de un tipo tienen linaje, cuantas son heredadas y cuantas estan marcadas.
+    No escribe: es el `--informe` del guion y lo unico que hace falta para decidir."""
+    return (f"\n                MATCH ()-[e:{tipo_rel}]->()\n"
+            "                RETURN count(e) AS total,\n"
+            "                       count(CASE WHEN e.chunks IS NULL THEN 1 END) AS heredadas,\n"
+            "                       count(CASE WHEN e.origen = $origen THEN 1 END) AS marcadas\n"
+            "                ")
+
+
+def cypher_marcar_heredadas(tipo_rel: str) -> str:
+    """Le pone fecha y nombre a lo viejo. ES ADITIVO Y REVERSIBLE (un `REMOVE` lo deshace) y no
+    hace falta para saber cual arista es vieja —`e.chunks IS NULL` ya lo dice—: sirve para dejar
+    escrito CUANDO se hizo el corte, y para que la adopcion sea visible (la carga saca la marca
+    en cuanto una extraccion nueva vuelve a afirmar esa arista)."""
+    return (f"\n                MATCH ()-[e:{tipo_rel}]->()\n"
+            "                WHERE e.chunks IS NULL AND e.origen IS NULL\n"
+            "                SET e.origen = $origen, e.marcado_el = $fecha\n                ")
+
+
+def cypher_heredadas_cerradas(tipo_rel: str, *, borrar: bool) -> str:
+    """Las heredadas cuyo CIERRE DE MENCIONES esta entero dentro de `$reextraidos`.
+
+    Con `borrar=False` las cuenta y no toca nada; con `borrar=True` las borra, que es
+    irreversible. Un extremo sin una sola `MENCIONA` deja el cierre vacio y la arista NO entra:
+    la regla se calla cuando no sabe, que es la unica forma de que no tenga falsos positivos.
+    """
+    final = "DELETE e" if borrar else "RETURN count(e) AS n"
+    return (f"\n                MATCH (a)-[e:{tipo_rel}]->(b)\n"
+            "                WHERE e.chunks IS NULL\n"
+            "                WITH e, [a, b] AS extremos\n"
+            "                UNWIND extremos AS x\n"
+            "                MATCH (l:Book)-[:CONTAINS]->(:Chunk)-[:MENCIONA]->(x)\n"
+            "                WITH e, collect(DISTINCT l.id) AS libros\n"
+            "                WHERE size(libros) > 0\n"
+            "                  AND all(lid IN libros WHERE lid IN $reextraidos)\n"
+            f"                {final}\n                ")
